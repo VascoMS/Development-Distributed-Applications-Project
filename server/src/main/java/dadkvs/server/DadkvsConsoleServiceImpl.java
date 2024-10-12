@@ -6,6 +6,8 @@ import dadkvs.DadkvsConsole;
 import dadkvs.DadkvsConsoleServiceGrpc;
 import io.grpc.stub.StreamObserver;
 
+import java.util.Arrays;
+
 public class DadkvsConsoleServiceImpl extends DadkvsConsoleServiceGrpc.DadkvsConsoleServiceImplBase {
 
 
@@ -22,9 +24,12 @@ public class DadkvsConsoleServiceImpl extends DadkvsConsoleServiceGrpc.DadkvsCon
     public void setleader(DadkvsConsole.SetLeaderRequest request, StreamObserver<DadkvsConsole.SetLeaderReply> responseObserver) {
         // for debug purposes
         System.out.println(request);
-
-        boolean response_value = true;
-        this.server_state.signalNewLeader(request.getIsleader());
+        // Checking if the server can become a leader according to the current configuration
+        int currentConfig = this.server_state.store.read(KeyValueStore.CONFIG_KEY).getValue();
+        int[] configMembers = this.server_state.configuration_matrix[currentConfig];
+        boolean canBeLeader = server_state.isPartOfConfig(server_state.my_id, configMembers);
+        if(!request.getIsleader() || canBeLeader)
+            this.server_state.signalNewLeader(request.getIsleader());
 
         // for debug purposes
         System.out.println("I am the leader = " + this.server_state.i_am_leader);
@@ -32,7 +37,7 @@ public class DadkvsConsoleServiceImpl extends DadkvsConsoleServiceGrpc.DadkvsCon
         //this.server_state.main_loop.wakeup();
 
         DadkvsConsole.SetLeaderReply response = DadkvsConsole.SetLeaderReply.newBuilder()
-                .setIsleaderack(response_value).build();
+                .setIsleaderack(canBeLeader).build();
 
         responseObserver.onNext(response);
         responseObserver.onCompleted();

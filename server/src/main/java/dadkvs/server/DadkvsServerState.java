@@ -17,6 +17,8 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
 public class DadkvsServerState {
+    private static final int DEFAULT_CONFIG = 0;
+    private static final int BLANK_ENTRY = -1;
     public final Lock execution_lock;
     public final Map<Integer, Condition> transaction_execution_conditions;
     public final Lock leader_lock;
@@ -25,8 +27,8 @@ public class DadkvsServerState {
     private final ConcurrentHashMap<Integer, TransactionLogEntry> transaction_consensus_map;
     private final HashMap<Integer, Integer> uncommited_consensus_accepts;
     public final List<Integer> transaction_execution_log;
-    private final ConfigurationHandler configuration_handler;
-    private final Integer[][] configuration_matrix;
+    private int current_config;
+    public final int[][] configuration_matrix;
     //private final Lock queue_lock;
     private final Condition empty_queue_condition;
     private final Condition i_am_leader_condition;
@@ -35,10 +37,9 @@ public class DadkvsServerState {
     int base_port;
     int my_id;
     int store_size;
-    int n_servers;
+    int total_num_servers;
     int largest_prepare_ts;
     int largest_accept_ts;
-    int majority;
     int current_index;
     int leader_ts;
     String default_host;
@@ -51,14 +52,13 @@ public class DadkvsServerState {
 
     public DadkvsServerState(int kv_size, int port, int myself) {
         base_port = port;
-        n_servers = 5;
+        total_num_servers = 5;
         my_id = myself;
         i_am_leader = false;
         default_host = "localhost";
         debug_mode = 0;
         largest_accept_ts = 0;
         largest_prepare_ts = 0;
-        majority = n_servers / 2 + 1;
         leader_ts = myself + 1;
         current_index = -1;
 
@@ -71,17 +71,16 @@ public class DadkvsServerState {
         empty_queue_condition = leader_lock.newCondition();
         execution_lock = new ReentrantLock();
         transaction_execution_conditions = new HashMap<>();
-        configuration_handler = new ConfigurationHandler(this);
-        configuration_matrix = new Integer[][]{{0, 1, 2}, {1, 2, 3}, {2, 3, 4}};
-
+        current_config = DEFAULT_CONFIG;
+        configuration_matrix = new int[][]{{0, 1, 2}, {1, 2, 3}, {2, 3, 4}};
 
         store_size = kv_size;
         store = new KeyValueStore(kv_size);
         leader_worker = new Thread(this::runPaxos);
         //main_loop_worker.start();
-        paxos_targets = new String[n_servers];
+        paxos_targets = new String[total_num_servers];
 
-        for (int i = 0; i < n_servers; i++) {
+        for (int i = 0; i < total_num_servers; i++) {
             int target_port = base_port + i;
             paxos_targets[i] = default_host + ":" + target_port;
         }
@@ -131,38 +130,43 @@ public class DadkvsServerState {
         return transaction_result_future;
     }
 
+    private int getMajority(){
+        return configuration_matrix[current_config].length;
+    }
+
     private void runAsLeader() {
         boolean reached_consensus = false;
 
         updateIndex();
-        configuration_handler.loadConfiguration();
+        loadConfiguration();
+        System.out.println("Config loaded: " + current_config);
         while (!reached_consensus && i_am_leader && isIndexEmpty(current_index)) {
             List<DadkvsPaxos.PhaseOneReply> phase_one_responses = new ArrayList<>();
             GenericResponseCollector<DadkvsPaxos.PhaseOneReply> phase_one_collector =
-                    new GenericResponseCollector<>(phase_one_responses, n_servers);
+                    new GenericResponseCollector<>(phase_one_responses, total_num_servers);
             List<DadkvsPaxos.PhaseTwoReply> phase_two_responses = new ArrayList<>();
             GenericResponseCollector<DadkvsPaxos.PhaseTwoReply> phase_two_collector =
-                    new GenericResponseCollector<>(phase_two_responses, n_servers);
+                    new GenericResponseCollector<>(phase_two_responses, total_num_servers);
 
             System.out.println("Queue size in leader: " + request_queue.size());
             phase_one_responses.clear();
             runPhase1(phase_one_collector, buildPhaseOneRequest(leader_ts));
-            phase_one_collector.waitForTarget(majority);
+            phase_one_collector.waitForTarget(getMajority());
             System.out.println("Number of responses: " + phase_one_collector.getReceived() + " Pending: " + phase_one_collector.getPending());
             System.out.println("RESPONSES: " + phase_one_responses.stream().map(DadkvsPaxos.PhaseOneReply::toString).collect(Collectors.toList()));
             boolean redo = handlePhaseOneResponses(phase_one_responses);
             if (redo)
                 continue;
-            if (phase_one_responses.size() >= majority) {
+            if (phase_one_responses.size() >= getMajority()) {
                 int chosen_value = pickValue(phase_one_responses);
                 runPhase2(phase_two_collector, buildPhaseTwoRequest(chosen_value, leader_ts));
-                phase_two_collector.waitForTarget(majority);
+                phase_two_collector.waitForTarget(getMajority());
                 System.out.println("Number of responses: " + phase_two_collector.getReceived() + " Pending: " + phase_one_collector.getPending());
                 System.out.println("RESPONSES: " + phase_two_responses.stream().map(DadkvsPaxos.PhaseTwoReply::toString).collect(Collectors.toList()));
                 redo = handlePhaseTwoResponses(phase_two_responses) ;
                 if (redo)
                     continue;
-                if (phase_two_responses.size() >= majority) {
+                if (phase_two_responses.size() >= getMajority()) {
                     reached_consensus = true;
                     moveTransactionToLog(chosen_value, current_index);
                 }
@@ -173,7 +177,7 @@ public class DadkvsServerState {
     public void sendLearnRequests(int index, int value, int timestamp) {
         DadkvsPaxos.LearnRequest.Builder learnRequest = DadkvsPaxos.LearnRequest.newBuilder();
         GenericResponseCollector<DadkvsPaxos.PhaseOneReply> learnResponseCollector =
-                new GenericResponseCollector<>(new ArrayList<>(), n_servers);
+                new GenericResponseCollector<>(new ArrayList<>(), total_num_servers);
         learnRequest.setLearnindex(index)
                 .setLearnvalue(value)
                 .setLearntimestamp(timestamp);
@@ -282,7 +286,7 @@ public class DadkvsServerState {
     }
 
     private void updateLeaderTimestamp(int response_ts) {
-        leader_ts += (int) Math.ceil((double) (response_ts - leader_ts) / n_servers) * n_servers;
+        leader_ts += (int) Math.ceil((double) (response_ts - leader_ts) / total_num_servers) * total_num_servers;
     }
 
     public void addTransactionRecordToQueue(Integer reqid, TransactionRecord transactionRecord) {
@@ -312,8 +316,9 @@ public class DadkvsServerState {
     }
 
     private void runPhase1(GenericResponseCollector<DadkvsPaxos.PhaseOneReply> phase_one_collector, DadkvsPaxos.PhaseOneRequest request) {
-        for (DadkvsPaxosServiceGrpc.DadkvsPaxosServiceStub stub : async_paxos_stubs) {
+        for (int serverIndex : configuration_matrix[current_config]) {
             System.out.println("Leader sending phase 1 request: ");
+            DadkvsPaxosServiceGrpc.DadkvsPaxosServiceStub stub = async_paxos_stubs[serverIndex];
             CollectorStreamObserver.printMessageFields(request);
             CollectorStreamObserver<DadkvsPaxos.PhaseOneReply> phase_one_observer = new CollectorStreamObserver<>(phase_one_collector);
             stub.phaseone(request, phase_one_observer);
@@ -321,8 +326,9 @@ public class DadkvsServerState {
     }
 
     private void runPhase2(GenericResponseCollector<DadkvsPaxos.PhaseTwoReply> phase_two_collector, DadkvsPaxos.PhaseTwoRequest request) {
-        for (DadkvsPaxosServiceGrpc.DadkvsPaxosServiceStub stub : async_paxos_stubs) {
+        for (int serverIndex : configuration_matrix[current_config]) {
             System.out.println("Leader sending phase 2 request:\n" + request);
+            DadkvsPaxosServiceGrpc.DadkvsPaxosServiceStub stub = async_paxos_stubs[serverIndex];
             CollectorStreamObserver.printMessageFields(request);
             CollectorStreamObserver<DadkvsPaxos.PhaseTwoReply> phase_two_observer = new CollectorStreamObserver<>(phase_two_collector);
             stub.phasetwo(request, phase_two_observer);
@@ -348,7 +354,10 @@ public class DadkvsServerState {
 
     public boolean previousTransactionComplete(int index) {
         System.out.println("Checking previous transaction for index: " + index);
-        return index == 0 || transaction_consensus_map.get(transaction_execution_log.get(index - 1)).hasCompleted();
+        if(index == 0)
+            return true;
+        int reqId = getValueFromLog(index - 1);
+        return reqId != -1 && transaction_consensus_map.get(reqId).hasCompleted();
     }
 
     public TransactionLogEntry getTransactionLogEntry(int reqId) {
@@ -356,15 +365,15 @@ public class DadkvsServerState {
     }
 
     private void initPaxosStubs() {
-        ManagedChannel[] channels = new ManagedChannel[n_servers];
+        ManagedChannel[] channels = new ManagedChannel[total_num_servers];
 
-        for (int i = 0; i < n_servers; i++) {
+        for (int i = 0; i < total_num_servers; i++) {
             channels[i] = ManagedChannelBuilder.forTarget(paxos_targets[i]).usePlaintext().build();
         }
 
-        async_paxos_stubs = new DadkvsPaxosServiceGrpc.DadkvsPaxosServiceStub[n_servers];
+        async_paxos_stubs = new DadkvsPaxosServiceGrpc.DadkvsPaxosServiceStub[total_num_servers];
 
-        for (int i = 0; i < n_servers; i++) {
+        for (int i = 0; i < total_num_servers; i++) {
             async_paxos_stubs[i] = DadkvsPaxosServiceGrpc.newStub(channels[i]);
         }
     }
@@ -407,55 +416,41 @@ public class DadkvsServerState {
     }
 
     private boolean isReconfig(int index){
-        int reqId = transaction_execution_log.get(index);
-        return transaction_consensus_map
+        int reqId = getValueFromLog(index);
+        return reqId != -1 &&
+                transaction_consensus_map
                 .get(reqId)
                 .getTransactionRecord()
                 .isReconfigTransaction();
     }
 
-    public void loadConfiguration(){
+    public boolean isPartOfConfig(int id, int[] config) {
+        return Arrays.stream(config).anyMatch(member -> member == id);
+    }
+
+    public synchronized void loadConfiguration(){
         // If we find a request that is completed before we find an incomplete reconfiguration, we can set the current configuration to what is in key 0
         // else if we find an incomplete reconfiguration, we set the current configuration to the respective configuration
-        /*boolean configSet = false;
-        int i = current_index - 1;
-        while(!configSet){
-            //Get the reqId from this transaction
-            int reqId = transaction_execution_log.get(i);
-            if(previousTransactionComplete(i)){
-                //Set the new configuration, taken from the KeyValueStore
-                configuration_handler.setCurrentConfig(store.read(reqId).getValue());
-                configSet = true;
-            }
-            else if(isReconfig(i)){
-                //Get the configuration from the stop
-                int thisConfig = transaction_consensus_map.get(reqId).getTransactionRecord().getRead1Key();
-                //Set the new configuration
-                configuration_handler.setCurrentConfig(thisConfig);
-                configSet = true;
-            }
-            i--;
-        }*/
+        for (int i = current_index; i > 0; i--) {
+            // Get the transaction based on the current index
+            int reqId = transaction_execution_log.get(i - 1);
 
-
-
-        int i = current_index - 1;
-        while(true){
-            //Get the reqId from this transaction
-            int reqId = transaction_execution_log.get(i);
-            if(previousTransactionComplete(i)){
-                //Set the new configuration, taken from the KeyValueStore
-                configuration_handler.setCurrentConfig(store.read(reqId).getValue());
+            // If we find a completed transaction before an incomplete reconfiguration
+            if (previousTransactionComplete(i)) {
+                // Set the new configuration from the KeyValueStore
+                current_config = store.read(KeyValueStore.CONFIG_KEY).getValue();
                 break;
             }
-            else if(isReconfig(i)){
-                //Get the configuration from the stop
-                int thisConfig = transaction_consensus_map.get(reqId).getTransactionRecord().getRead1Key();
-                //Set the new configuration
-                configuration_handler.setCurrentConfig(thisConfig);
+            // Check if this transaction is an incomplete reconfiguration
+            else if (isReconfig(i - 1)) {
+                // Set the current configuration from the transaction consensus map
+                current_config = transaction_consensus_map.get(reqId)
+                        .getTransactionRecord().getPrepareValue();
                 break;
             }
-            i--;
+        }
+        if(!isPartOfConfig(my_id, configuration_matrix[current_config])){
+            i_am_leader = false;
         }
     }
 
