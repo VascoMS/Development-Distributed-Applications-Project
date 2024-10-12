@@ -35,18 +35,18 @@ public class DadkvsClient {
 
 
     public DadkvsClient() {
-        interactive_mode = false;
-        key_range = 5;
-        sleep_range = 5;
-        loop_size = 1;
-        n_servers = 5;
-        client_id = 1;
-        port = 8080;
-        host = "localhost";
-        sequence_number = 0;
-        responses_needed = 1;
-        rnd = new Random();
-        targets = new String[n_servers];
+        this.interactive_mode = false;
+        this.key_range = 5;
+        this.sleep_range = 5;
+        this.loop_size = 1;
+        this.n_servers = 5;
+        this.client_id = 1;
+        this.port = 8080;
+        this.host = "localhost";
+        this.sequence_number = 0;
+        this.responses_needed = 1;
+        this.rnd = new Random();
+        this.targets = new String[n_servers];
     }
 
     public static void main(String[] args) throws Exception {
