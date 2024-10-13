@@ -1,17 +1,16 @@
 package dadkvs.server;
 
-public class TransactionLogEntry {
+public class PaxosRequestEntry {
     private TransactionRecord transactionRecord;
-    private boolean wasCommited;
-    private boolean wasAborted;
+    private RequestState requestState;
 
-    public TransactionLogEntry(TransactionRecord transactionRecord) {
+    public PaxosRequestEntry(TransactionRecord transactionRecord, RequestState requestState) {
         this.transactionRecord = transactionRecord;
         this.wasCommited = false;
         this.wasAborted = false;
     }
 
-    public TransactionLogEntry() {
+    public PaxosRequestEntry() {
         this.transactionRecord = null;
         this.wasCommited = false;
         this.wasAborted = false;

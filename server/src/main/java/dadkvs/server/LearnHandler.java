@@ -40,17 +40,26 @@ public class LearnHandler {
         try {
             serverState.execution_lock.lock();
             verifyExecution(reqId, index);
-            TransactionLogEntry transactionLogEntry = serverState.getTransactionLogEntry(reqId);
-            TransactionRecord transactionRecord = transactionLogEntry.getTransactionRecord();
+            PaxosRequestEntry paxosRequestEntry = serverState.getPaxosRequestEntry(reqId);
+            TransactionRecord transactionRecord = paxosRequestEntry.getTransactionRecord();
             transactionRecord.setTimestamp(index);
             boolean commitSuccessful = serverState.store.commit(transactionRecord);
             if (commitSuccessful) {
-                transactionLogEntry.setCommited();
+                paxosRequestEntry.setCommited();
             } else {
-                transactionLogEntry.setAborted();
+                paxosRequestEntry.setAborted();
             }
             serverState.transaction_execution_conditions.remove(index);
             serverState.completeClientRequest(reqId, commitSuccessful);
+
+            if(transactionRecord.isReconfigTransaction()){
+                try {
+                    serverState.leader_lock.lock();
+                    serverState.reconfig_condition.signal();
+                } finally {
+                    serverState.leader_lock.unlock();
+                }
+            }
 
             int nextPendingRequest = serverState.getValueFromLog(index + 1);
             if (nextPendingRequest != -1 && serverState.transaction_execution_conditions.containsKey(nextPendingRequest))

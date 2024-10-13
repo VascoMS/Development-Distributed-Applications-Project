@@ -8,9 +8,7 @@ import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.*;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -19,12 +17,13 @@ import java.util.stream.Collectors;
 public class DadkvsServerState {
     private static final int DEFAULT_CONFIG = 0;
     private static final int BLANK_ENTRY = -1;
+    private static final int NUM_MULTIPAXOS_ROUNDS = 5;
     public final Lock execution_lock;
     public final Map<Integer, Condition> transaction_execution_conditions;
     public final Lock leader_lock;
     private final ConcurrentLinkedQueue<RequestQueueEntry> request_queue;
     private final ConcurrentHashMap<Integer, CompletableFuture<Boolean>> request_future_map;
-    private final ConcurrentHashMap<Integer, TransactionLogEntry> transaction_consensus_map;
+    private final ConcurrentHashMap<Integer, PaxosRequestEntry> transaction_consensus_map;
     private final HashMap<Integer, Integer> uncommited_consensus_accepts;
     public final List<Integer> transaction_execution_log;
     private int current_config;
@@ -32,16 +31,17 @@ public class DadkvsServerState {
     //private final Lock queue_lock;
     private final Condition empty_queue_condition;
     private final Condition i_am_leader_condition;
+    public final Condition reconfig_condition;
+    private final ExecutorService paxos_leader_executor;
     boolean i_am_leader;
     int debug_mode;
     int base_port;
     int my_id;
     int store_size;
     int total_num_servers;
-    int largest_prepare_ts;
-    int largest_accept_ts;
+    // TODO: Implement new current index logic
     int current_index;
-    int leader_ts;
+    Map<Integer, TimestampState> timestamp_state_map;
     String default_host;
     KeyValueStore store;
     //MainLoop main_loop;
@@ -57,11 +57,8 @@ public class DadkvsServerState {
         i_am_leader = false;
         default_host = "localhost";
         debug_mode = 0;
-        largest_accept_ts = 0;
-        largest_prepare_ts = 0;
-        leader_ts = myself + 1;
         current_index = -1;
-
+        timestamp_state_map = new HashMap<>();
         request_queue = new ConcurrentLinkedQueue<>();
         request_future_map = new ConcurrentHashMap<>();
         transaction_consensus_map = new ConcurrentHashMap<>();
@@ -69,10 +66,12 @@ public class DadkvsServerState {
         leader_lock = new ReentrantLock();
         i_am_leader_condition = leader_lock.newCondition();
         empty_queue_condition = leader_lock.newCondition();
+        reconfig_condition = leader_lock.newCondition();
         execution_lock = new ReentrantLock();
         transaction_execution_conditions = new HashMap<>();
         current_config = DEFAULT_CONFIG;
         configuration_matrix = new int[][]{{0, 1, 2}, {1, 2, 3}, {2, 3, 4}};
+        paxos_leader_executor = Executors.newFixedThreadPool(NUM_MULTIPAXOS_ROUNDS);
 
         store_size = kv_size;
         store = new KeyValueStore(kv_size);
@@ -97,7 +96,12 @@ public class DadkvsServerState {
             try {
                 if (i_am_leader) {
                     if (!request_queue.isEmpty()) {
-                        runAsLeader();
+                        RequestQueueEntry nextRequestToPropose = request_queue.peek();
+                        moveTransactionToMap(nextRequestToPropose.getReqid(), RequestState.AWAITING_PROPOSAL);
+                        paxos_leader_executor.submit(() -> runAsLeader(nextRequestToPropose));
+                        if(nextRequestToPropose.getTransactionRecord().isReconfigTransaction()){
+                            reconfig_condition.await();
+                        }
                     } else {
                         // Waiting for queue to have transactions to be proposed
                         empty_queue_condition.await();
@@ -112,6 +116,8 @@ public class DadkvsServerState {
             }
         }
     }
+
+
 
     public void signalNewLeader(boolean isLeader) {
         leader_lock.lock();
@@ -134,9 +140,9 @@ public class DadkvsServerState {
         return configuration_matrix[current_config].length;
     }
 
-    private void runAsLeader() {
+    private void runAsLeader(RequestQueueEntry requestQueueEntry) {
         boolean reached_consensus = false;
-
+        //TODO: Put request back in the queue if it wasn't accepted by the consensus and wakeup reconfig condition
         updateIndex();
         loadConfiguration();
         System.out.println("Config loaded: " + current_config);
@@ -158,7 +164,7 @@ public class DadkvsServerState {
             if (redo)
                 continue;
             if (phase_one_responses.size() >= getMajority()) {
-                int chosen_value = pickValue(phase_one_responses);
+                int chosen_value = pickValue(phase_one_responses, requestQueueEntry.getReqid());
                 runPhase2(phase_two_collector, buildPhaseTwoRequest(chosen_value, leader_ts));
                 phase_two_collector.waitForTarget(getMajority());
                 System.out.println("Number of responses: " + phase_two_collector.getReceived() + " Pending: " + phase_one_collector.getPending());
@@ -201,7 +207,6 @@ public class DadkvsServerState {
 
         boolean hasGreaterLeader = largestTimestamp > leader_ts;
         if (hasGreaterLeader) {
-            //BackoffStrategy.randomSleep(5, 20);
             updateLeaderTimestamp(largestTimestamp);
         }
 
@@ -217,7 +222,6 @@ public class DadkvsServerState {
         }
         boolean hasGreaterLeader = largestTimestamp > leader_ts;
         if (hasGreaterLeader) {
-            //BackoffStrategy.randomSleep(5, 20);
             updateLeaderTimestamp(largestTimestamp);
         }
         return hasGreaterLeader;
@@ -239,17 +243,17 @@ public class DadkvsServerState {
 
     public synchronized void moveTransactionToLog(int reqId, int index) {
         System.out.println("Queue size when moving to log: " + request_queue.size());
-        moveTransactionToMap(reqId);
+        moveTransactionToMap(reqId, RequestState.PENDING_EXECUTION);
         fillTransactionLog(index);
         addTransactionToLog(reqId, index);
     }
 
-    public synchronized void moveTransactionToMap(int reqId){
+    public synchronized void moveTransactionToMap(int reqId, RequestState initialState){
         RequestQueueEntry req = findAndRemoveFromQueue(reqId);
         if (req != null) {
-            transaction_consensus_map.put(reqId, new TransactionLogEntry(req.getTransactionRecord()));
+            transaction_consensus_map.put(reqId, new PaxosRequestEntry(req.getTransactionRecord(), initialState));
         } else if(!transaction_consensus_map.containsKey(reqId)) {
-            transaction_consensus_map.put(reqId, new TransactionLogEntry());
+            transaction_consensus_map.put(reqId, new PaxosRequestEntry());
         }
     }
 
@@ -311,9 +315,10 @@ public class DadkvsServerState {
 
     }
 
-    private Integer getReqId() {
-        return request_queue.peek() != null ? request_queue.peek().getReqid(): -1;
-    }
+    /*private synchronized RequestQueueEntry getReqFromQueue() {
+        RequestQueueEntry req = request_queue.peek();
+        return request_queue.poll() != null ? request_queue.po().getReqid(): -1;
+    }*/
 
     private void runPhase1(GenericResponseCollector<DadkvsPaxos.PhaseOneReply> phase_one_collector, DadkvsPaxos.PhaseOneRequest request) {
         for (int serverIndex : configuration_matrix[current_config]) {
@@ -335,7 +340,7 @@ public class DadkvsServerState {
         }
     }
 
-    private Integer pickValue(List<DadkvsPaxos.PhaseOneReply> responses) {
+    private int pickValue(List<DadkvsPaxos.PhaseOneReply> responses, int reqId) {
         // Retrieving the response with the largest accepted timestamp
         int largestTimestamp = 0;
         int acceptedValue = 0;
@@ -345,7 +350,7 @@ public class DadkvsServerState {
                 acceptedValue = response.getPhase1Value();
             }
         }
-        return largestTimestamp > 0 ? acceptedValue : getReqId();
+        return largestTimestamp > 0 ? acceptedValue : reqId;
     }
 
     public boolean transactionAvailable(int reqId) {
@@ -360,7 +365,7 @@ public class DadkvsServerState {
         return reqId != -1 && transaction_consensus_map.get(reqId).hasCompleted();
     }
 
-    public TransactionLogEntry getTransactionLogEntry(int reqId) {
+    public PaxosRequestEntry getPaxosRequestEntry(int reqId) {
         return transaction_consensus_map.get(reqId);
     }
 
@@ -452,6 +457,19 @@ public class DadkvsServerState {
         if(!isPartOfConfig(my_id, configuration_matrix[current_config])){
             i_am_leader = false;
         }
+    }
+
+    public int getTimeStamp(int reqIndex, TimestampEnum timestampType){
+        TimestampState thisTimeStamp = timestamp_state_map.get(reqIndex);
+        if (thisTimeStamp == null){
+            return -1;
+        }
+        return switch (timestampType) {
+            case PREPARE -> thisTimeStamp.getLargestPrepareTs();
+            case ACCEPT -> thisTimeStamp.getLargestAcceptTs();
+            case LEADER -> thisTimeStamp.getLeaderTs();
+            default -> -1;
+        };
     }
 
 }

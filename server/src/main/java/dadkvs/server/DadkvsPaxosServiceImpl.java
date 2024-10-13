@@ -33,19 +33,20 @@ public class DadkvsPaxosServiceImpl extends DadkvsPaxosServiceGrpc.DadkvsPaxosSe
         DadkvsPaxos.PhaseOneReply phase_one_response;
         try {
             paxosStateLock.lock();
-            if (request.getPhase1Timestamp() < server_state.largest_prepare_ts
-                    || request.getPhase1Timestamp() < server_state.largest_accept_ts) {
-                phase_one_response = build_phase_one_response(false, server_state.largest_prepare_ts,
-                        -1, request.getPhase1Index());
+            int reqIndex = request.getPhase1Index();
+            int reqTS = request.getPhase1Timestamp();
+            if (isOlderTS(reqTS, reqIndex)) {
+                phase_one_response = build_phase_one_response(false, server_state.getTimeStamp(reqIndex, TimestampEnum.PREPARE),
+                        -1, reqIndex);
             } else {
                 int request_to_send;
-                server_state.largest_prepare_ts = request.getPhase1Timestamp();
+                updatePrepareTimestampState(reqIndex, reqTS);
                 if (!server_state.isIndexEmpty(request.getPhase1Index()))
                     request_to_send = server_state.getValueFromLog(request.getPhase1Index());
                 else
                     request_to_send = server_state.getUncommitedConsensusAccept(request.getPhase1Index());
                 phase_one_response = build_phase_one_response(true,
-                        request_to_send != -1 ? server_state.largest_accept_ts : -1, request_to_send, request.getPhase1Index());
+                        request_to_send != -1 ? server_state.getTimeStamp(reqIndex, TimestampEnum.ACCEPT) : -1, request_to_send, reqIndex);
             }
         } finally {
             paxosStateLock.unlock();
@@ -54,7 +55,36 @@ public class DadkvsPaxosServiceImpl extends DadkvsPaxosServiceGrpc.DadkvsPaxosSe
         responseObserver.onCompleted();
     }
 
-    private DadkvsPaxos.PhaseOneReply build_phase_one_response(boolean accepted, int ts, int value, int index){
+    private void updatePrepareTimestampState(int index, int newPrepareTS) {
+        TimestampState tsState = server_state.timestamp_state_map.get(index);
+        if(tsState == null){
+            tsState = new TimestampState(server_state.my_id);
+            server_state.timestamp_state_map.put(index, tsState);
+        }
+        tsState.setLargestPrepareTs(newPrepareTS);
+    }
+
+    private void updateAcceptTimestampState(int index, int newAcceptTS) {
+        TimestampState tsState = server_state.timestamp_state_map.get(index);
+        if(tsState == null){
+            tsState = new TimestampState(server_state.my_id);
+            server_state.timestamp_state_map.put(index, tsState);
+        }
+        tsState.setLargestPrepareTs(newAcceptTS);
+    }
+
+    private boolean isOlderTS(int ts, int index) {
+        //turned Integer into int
+        int largestPrepareTS = server_state.getTimeStamp(index, TimestampEnum.PREPARE);
+        int largestAcceptTS = server_state.getTimeStamp(index, TimestampEnum.ACCEPT);
+
+        //Cuz its an int, it can only be -1
+        return (largestPrepareTS != -1 && ts < largestPrepareTS) || (largestAcceptTS != -1 && ts < largestAcceptTS);
+
+    }
+
+
+    private DadkvsPaxos.PhaseOneReply build_phase_one_response(boolean accepted, int ts, int value, int index) {
         DadkvsPaxos.PhaseOneReply.Builder phase_one_response_builder = DadkvsPaxos.PhaseOneReply.newBuilder();
         return phase_one_response_builder
                 .setPhase1Accepted(accepted)
@@ -72,19 +102,20 @@ public class DadkvsPaxosServiceImpl extends DadkvsPaxosServiceGrpc.DadkvsPaxosSe
         DadkvsPaxos.PhaseTwoReply.Builder phase_two_response = DadkvsPaxos.PhaseTwoReply.newBuilder();
         try {
             paxosStateLock.lock();
-            if(request.getPhase2Timestamp() < server_state.largest_prepare_ts
-                    || request.getPhase2Timestamp() < server_state.largest_accept_ts){
+            int reqIndex = request.getPhase2Index();
+            int reqTS = request.getPhase2Timestamp();
+            if (isOlderTS(reqTS, reqIndex)) {
                 phase_two_response
                         .setPhase2Accepted(false)
                         .setPhase2Index(request.getPhase2Index())
-                        .setPhase2Timestamp(server_state.largest_prepare_ts);
+                        .setPhase2Timestamp(server_state.getTimeStamp(reqIndex, TimestampEnum.PREPARE));
             } else {
                 phase_two_response.setPhase2Accepted(true);
-                server_state.largest_accept_ts = request.getPhase2Timestamp();
-                server_state.addAcceptedValue(request.getPhase2Index(), request.getPhase2Value());
+                updateAcceptTimestampState(reqIndex, reqTS);
+                server_state.addAcceptedValue(reqIndex, request.getPhase2Value());
                 Context forkedContext = Context.current().fork();
                 forkedContext.run(() -> {
-                    server_state.sendLearnRequests(request.getPhase2Index(), request.getPhase2Value(), request.getPhase2Timestamp());
+                    server_state.sendLearnRequests(reqIndex, request.getPhase2Value(), reqTS);
                 });
             }
         } finally {
