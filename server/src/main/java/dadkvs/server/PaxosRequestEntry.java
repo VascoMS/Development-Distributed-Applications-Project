@@ -6,31 +6,30 @@ public class PaxosRequestEntry {
 
     public PaxosRequestEntry(TransactionRecord transactionRecord, RequestState requestState) {
         this.transactionRecord = transactionRecord;
-        this.wasCommited = false;
-        this.wasAborted = false;
+        this.requestState = requestState;
     }
 
     public PaxosRequestEntry() {
         this.transactionRecord = null;
-        this.wasCommited = false;
-        this.wasAborted = false;
+        // When a request entry is created without a transactionRecord it means it was approved by consensus but
+        // the request hasn't yet arrived from the client, therefore it starts in the PENDING_EXECUTION state
+        this.requestState = RequestState.PENDING_EXECUTION;
     }
 
     public boolean wasAborted() {
-        return wasAborted;
+        return requestState == RequestState.ABORTED;
     }
 
     public void setAborted() {
-        this.wasAborted = true;
-        this.wasCommited = false;
+        this.requestState = RequestState.ABORTED;
     }
 
     public boolean hasCompleted() {
-        return this.wasAborted || this.wasCommited;
+        return this.requestState == RequestState.ABORTED || this.requestState == RequestState.COMMITTED;
     }
 
     public boolean isPending() {
-        return !this.wasAborted && !this.wasCommited;
+        return this.requestState == RequestState.PENDING_EXECUTION;
     }
 
     public TransactionRecord getTransactionRecord() {
@@ -42,13 +41,14 @@ public class PaxosRequestEntry {
     }
 
     public boolean wasCommited() {
-        return wasCommited;
+        return this.requestState == RequestState.COMMITTED;
     }
 
-    public boolean transactionIsAvailable(){return transactionRecord != null;}
+    public boolean transactionIsAvailable(){
+        return transactionRecord != null;
+    }
 
     public void setCommited() {
-        wasCommited = true;
-        wasAborted = false;
+        this.requestState = RequestState.COMMITTED;
     }
 }

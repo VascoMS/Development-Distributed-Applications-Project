@@ -1,5 +1,6 @@
 package dadkvs.server;
 
+import com.google.rpc.context.AttributeContext;
 import dadkvs.DadkvsPaxos;
 import dadkvs.DadkvsPaxosServiceGrpc;
 import dadkvs.util.CollectorStreamObserver;
