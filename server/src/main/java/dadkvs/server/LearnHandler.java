@@ -24,13 +24,12 @@ public class LearnHandler {
         } else if (learnRequest.getLearntimestamp() == learnRequestEntry.getTimestamp() &&
                 learnRequestEntry.increaseCount() == learnMajority) {
             System.out.println("LEARNER COUNT: " + learnRequestEntry.getCount() + " TIMESTAMP: " + learnRequest.getLearntimestamp());
-            //if (serverState.isIndexEmpty(index)) {
-                System.out.println("MOVING REQ TO LOG: req-" + reqId + " index- " + index);
-                serverState.moveTransactionToLog(reqId, index);
-                Thread executionWorker = new Thread(() -> executeTransaction(reqId, index));
-                executionWorker.start();
-            //}
-            serverState.clearAcceptedValue(learnRequest.getLearnindex());
+            System.out.println("MOVING REQ TO LOG: req-" + reqId + " index- " + index);
+            serverState.moveTransactionToLog(reqId, index);
+            Thread executionWorker = new Thread(() -> executeTransaction(reqId, index));
+            executionWorker.start();
+            if(!serverState.i_am_leader)
+                serverState.removePaxosRoundState(learnRequest.getLearnindex());
         }
 
     }

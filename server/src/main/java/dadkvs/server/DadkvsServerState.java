@@ -25,7 +25,7 @@ public class DadkvsServerState {
     private final ConcurrentLinkedQueue<RequestQueueEntry> request_queue;
     private final ConcurrentHashMap<Integer, CompletableFuture<Boolean>> request_future_map;
     private final ConcurrentHashMap<Integer, PaxosRequestEntry> transaction_consensus_map;
-    private final HashMap<Integer, Integer> uncommited_consensus_accepts;
+    ConcurrentHashMap<Integer, PaxosRoundState> paxos_round_state_map;
     public final List<Integer> transaction_execution_log;
     private int current_config;
     public final int[][] configuration_matrix;
@@ -42,7 +42,7 @@ public class DadkvsServerState {
     int total_num_servers;
     // TODO: Implement new current index logic
     int current_index;
-    Map<Integer, TimestampState> timestamp_state_map;
+
     String default_host;
     KeyValueStore store;
     //MainLoop main_loop;
@@ -59,7 +59,7 @@ public class DadkvsServerState {
         default_host = "localhost";
         debug_mode = 0;
         current_index = -1;
-        timestamp_state_map = new HashMap<>();
+        paxos_round_state_map = new ConcurrentHashMap<>();
         request_queue = new ConcurrentLinkedQueue<>();
         request_future_map = new ConcurrentHashMap<>();
         transaction_consensus_map = new ConcurrentHashMap<>();
@@ -70,6 +70,7 @@ public class DadkvsServerState {
         reconfig_condition = leader_lock.newCondition();
         execution_lock = new ReentrantLock();
         transaction_execution_conditions = new HashMap<>();
+        // TODO: Maybe store config for each round
         current_config = DEFAULT_CONFIG;
         configuration_matrix = new int[][]{{0, 1, 2}, {1, 2, 3}, {2, 3, 4}};
         paxos_leader_executor = Executors.newFixedThreadPool(NUM_MULTIPAXOS_ROUNDS);
@@ -87,8 +88,6 @@ public class DadkvsServerState {
 
         initPaxosStubs();
         leader_worker.start();
-
-        uncommited_consensus_accepts = new HashMap<>();
     }
 
     public void runPaxos() {
@@ -98,8 +97,10 @@ public class DadkvsServerState {
                 if (i_am_leader) {
                     if (!request_queue.isEmpty()) {
                         RequestQueueEntry nextRequestToPropose = request_queue.peek();
+
                         moveTransactionToMap(nextRequestToPropose.getReqid(), RequestState.AWAITING_PROPOSAL);
                         paxos_leader_executor.submit(() -> runAsLeader(nextRequestToPropose));
+
                         if(nextRequestToPropose.getTransactionRecord().isReconfigTransaction()){
                             reconfig_condition.await();
                         }
@@ -138,7 +139,7 @@ public class DadkvsServerState {
     }
 
     private int getMajority(){
-        return configuration_matrix[current_config].length;
+        return configuration_matrix[current_config].length / 2 + 1;
     }
 
     private void runAsLeader(RequestQueueEntry requestQueueEntry) {
@@ -175,10 +176,25 @@ public class DadkvsServerState {
                     continue;
                 if (phase_two_responses.size() >= getMajority()) {
                     reached_consensus = true;
-                    moveTransactionToLog(chosen_value, current_index);
+                    moveTransactionToLog(chosen_value, index);
+                    if(chosen_value != requestQueueEntry.getReqid())
+                        returnRequestToQueue(requestQueueEntry);
+                    removePaxosRoundState(index);
                 }
             }
         }
+    }
+
+    private void returnRequestToQueue(RequestQueueEntry requestQueueEntry){
+        //TODO: Confirm whether adding to the end of the queue is bad
+        request_queue.offer(requestQueueEntry);
+        if(requestQueueEntry.getTransactionRecord().isReconfigTransaction())
+            try {
+                leader_lock.lock();
+                reconfig_condition.signal();
+            } finally {
+                leader_lock.unlock();
+            }
     }
 
     public void sendLearnRequests(int index, int value, int timestamp) {
@@ -249,12 +265,14 @@ public class DadkvsServerState {
         addTransactionToLog(reqId, index);
     }
 
-    public synchronized void moveTransactionToMap(int reqId, RequestState initialState){
+    public synchronized void moveTransactionToMap(int reqId, RequestState requestState){
         RequestQueueEntry req = findAndRemoveFromQueue(reqId);
         if (req != null) {
-            transaction_consensus_map.put(reqId, new PaxosRequestEntry(req.getTransactionRecord(), initialState));
+            transaction_consensus_map.put(reqId, new PaxosRequestEntry(req.getTransactionRecord(), requestState));
         } else if(!transaction_consensus_map.containsKey(reqId)) {
             transaction_consensus_map.put(reqId, new PaxosRequestEntry());
+        } else if (!transaction_consensus_map.get(reqId).getRequestState().equals(requestState)){
+            transaction_consensus_map.get(reqId).setRequestState(requestState);
         }
     }
 
@@ -399,26 +417,33 @@ public class DadkvsServerState {
         return index > transaction_execution_log.size() - 1 || transaction_execution_log.get(index) == null;
     }
 
-    public void clearAcceptedValue(int index){
-        uncommited_consensus_accepts.remove(index);
+    public void removePaxosRoundState(int index){
+        Lock paxosStateLock = paxos_round_state_map.get(index).getPaxosStateLock();
+        try {
+            paxosStateLock.lock();
+            paxos_round_state_map.get(index).getPaxosStateLock().lock();
+            paxos_round_state_map.remove(index);
+        } finally {
+            paxosStateLock.unlock();
+        }
     }
 
     public void addAcceptedValue(int index, int value){
-        uncommited_consensus_accepts.put(index, value);
+        paxos_round_state_map.get(index).setUncommitedAcceptedRequest(value);
     }
 
-    public synchronized void updateIndex(){
+    public synchronized int updateIndex(){
         int i = current_index + 1;
         while(i < transaction_execution_log.size() && transaction_execution_log.get(i) != null) {
             i++;
         }
         current_index = i;
+        return current_index;
     }
 
     public int getUncommitedConsensusAccept(int index){
-        if(uncommited_consensus_accepts.get(index) == null)
-            return -1;
-        return uncommited_consensus_accepts.get(index);
+        PaxosRoundState paxosRoundState = paxos_round_state_map.get(index);
+        return paxosRoundState != null ? paxosRoundState.getUncommitedAcceptedRequest() : -1;
     }
 
     private boolean isReconfig(int index){
@@ -460,17 +485,25 @@ public class DadkvsServerState {
         }
     }
 
-    public int getTimeStamp(int reqIndex, TimestampEnum timestampType){
-        TimestampState thisTimeStamp = timestamp_state_map.get(reqIndex);
-        if (thisTimeStamp == null){
+    public TimestampState getTimestampState(int round){
+        return paxos_round_state_map.get(round) != null ? paxos_round_state_map.get(round).getTimestampState() : null;
+    }
+
+    public int getTimestamp(int reqIndex, TimestampEnum timestampType){
+        TimestampState timestampState = paxos_round_state_map.get(reqIndex).getTimestampState();
+        if (timestampState == null){
             return -1;
         }
         return switch (timestampType) {
-            case PREPARE -> thisTimeStamp.getLargestPrepareTs();
-            case ACCEPT -> thisTimeStamp.getLargestAcceptTs();
-            case LEADER -> thisTimeStamp.getLeaderTs();
+            case PREPARE -> timestampState.getLargestPrepareTs();
+            case ACCEPT -> timestampState.getLargestAcceptTs();
+            case LEADER -> timestampState.getLeaderTs();
             default -> -1;
         };
+    }
+
+    private int getLeaderTs(int round){
+        return paxos_round_state_map.get(round).getTimestampState().getLeaderTs();
     }
 
 }

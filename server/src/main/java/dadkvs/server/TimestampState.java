@@ -11,6 +11,11 @@ public class TimestampState {
         this.largestAcceptTs = 0;
     }
 
+    public TimestampState(){
+        this.largestPrepareTs = 0;
+        this.largestAcceptTs = 0;
+    }
+
     public int getLeaderTs() {
         return leaderTs;
     }

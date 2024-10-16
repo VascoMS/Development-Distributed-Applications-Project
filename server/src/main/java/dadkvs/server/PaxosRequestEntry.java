@@ -16,6 +16,14 @@ public class PaxosRequestEntry {
         this.requestState = RequestState.PENDING_EXECUTION;
     }
 
+    public RequestState getRequestState() {
+        return requestState;
+    }
+
+    public void setRequestState(RequestState requestState) {
+        this.requestState = requestState;
+    }
+
     public boolean wasAborted() {
         return requestState == RequestState.ABORTED;
     }
@@ -36,7 +44,7 @@ public class PaxosRequestEntry {
         return transactionRecord;
     }
 
-    public void setTransactionRecord(TransactionRecord transactionRecord){
+    public void setTransactionRecord(TransactionRecord transactionRecord) {
         this.transactionRecord = transactionRecord;
     }
 
@@ -44,7 +52,7 @@ public class PaxosRequestEntry {
         return this.requestState == RequestState.COMMITTED;
     }
 
-    public boolean transactionIsAvailable(){
+    public boolean transactionIsAvailable() {
         return transactionRecord != null;
     }
 
