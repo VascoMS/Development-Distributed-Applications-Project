@@ -66,21 +66,27 @@ public class DadkvsPaxosServiceImpl extends DadkvsPaxosServiceGrpc.DadkvsPaxosSe
 
 
     private void updatePrepareTimestampState(int index, int newPrepareTS) {
-        TimestampState tsState = server_state.timestamp_state_map.get(index);
+        TimestampState tsState = server_state.getTimestampState(index);
         if(tsState == null){
             tsState = new TimestampState(server_state.my_id);
-            server_state.timestamp_state_map.put(index, tsState);
+            PaxosRoundState newPaxosRoundState = new PaxosRoundState();
+            newPaxosRoundState.setTimestampState(tsState);
+
+            server_state.paxos_round_state_map.put(index, newPaxosRoundState);
         }
         tsState.setLargestPrepareTs(newPrepareTS);
     }
 
     private void updateAcceptTimestampState(int index, int newAcceptTS) {
-        TimestampState tsState = server_state.timestamp_state_map.get(index);
+        TimestampState tsState = server_state.getTimestampState(index);
         if(tsState == null){
             tsState = new TimestampState(server_state.my_id);
-            server_state.timestamp_state_map.put(index, tsState);
+            PaxosRoundState newPaxosRoundState = new PaxosRoundState();
+            newPaxosRoundState.setTimestampState(tsState);
+
+            server_state.paxos_round_state_map.put(index, newPaxosRoundState);
         }
-        tsState.setLargestPrepareTs(newAcceptTS);
+        tsState.setLargestAcceptTs(newAcceptTS);
     }
 
     private boolean isOlderTS(int ts, int index) {
