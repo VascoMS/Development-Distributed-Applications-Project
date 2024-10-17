@@ -63,8 +63,6 @@ public class DadkvsPaxosServiceImpl extends DadkvsPaxosServiceGrpc.DadkvsPaxosSe
         return server_state.paxos_round_state_map.get(round);
     }
 
-
-
     private void updatePrepareTimestampState(int index, int newPrepareTS) {
         TimestampState tsState = server_state.getTimestampState(index);
         if(tsState == null){

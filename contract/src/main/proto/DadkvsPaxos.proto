@@ -4,6 +4,23 @@
 syntax = "proto3";
 package dadkvs;
 
+message MultiPaxosPhase1Request {
+
+}
+
+message MultiPaxosPhase1Response {
+
+}
+
+message MultiPaxosPhase2Request {
+}
+
+message MultiPaxosPhase2Response {
+
+}
+
+
+
 message PhaseOneRequest {
   int32 phase1config    = 1;
   int32 phase1index     = 2;
