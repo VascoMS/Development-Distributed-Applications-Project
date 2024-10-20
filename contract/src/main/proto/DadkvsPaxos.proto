@@ -4,22 +4,21 @@
 syntax = "proto3";
 package dadkvs;
 
-message MultiPaxosPhase1Request {
-
+message MultiPaxosPhaseOneRequest {
+  repeated PhaseOneRequest request = 1;
 }
 
-message MultiPaxosPhase1Response {
-
+message MultiPaxosPhaseOneResponse {
+  repeated PhaseOneReply response = 1;
 }
 
-message MultiPaxosPhase2Request {
+message MultiPaxosPhaseTwoRequest {
+  repeated PhaseTwoRequest request = 1;
 }
 
-message MultiPaxosPhase2Response {
-
+message MultiPaxosPhaseTwoResponse {
+  repeated PhaseTwoReply response = 1;
 }
-
-
 
 message PhaseOneRequest {
   int32 phase1config    = 1;
@@ -63,8 +62,8 @@ message LearnReply {
 }
 
 service DadkvsPaxosService {
-  rpc phaseone (PhaseOneRequest) returns (PhaseOneReply);
-  rpc phasetwo (PhaseTwoRequest) returns (PhaseTwoReply);
+  rpc phaseone (MultiPaxosPhaseOneRequest) returns (MultiPaxosPhaseOneResponse);
+  rpc phasetwo (MultiPaxosPhaseTwoRequest) returns (MultiPaxosPhaseTwoResponse);
   rpc learn (LearnRequest) returns (LearnReply);
 }
 

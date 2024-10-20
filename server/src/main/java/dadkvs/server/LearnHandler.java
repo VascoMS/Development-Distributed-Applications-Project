@@ -3,6 +3,7 @@ package dadkvs.server;
 import dadkvs.DadkvsPaxos;
 
 import java.util.HashMap;
+import java.util.List;
 
 public class LearnHandler {
     private final DadkvsServerState serverState;
@@ -25,7 +26,7 @@ public class LearnHandler {
                 learnRequestEntry.increaseCount() == learnMajority) {
             System.out.println("LEARNER COUNT: " + learnRequestEntry.getCount() + " TIMESTAMP: " + learnRequest.getLearntimestamp());
             System.out.println("MOVING REQ TO LOG: req-" + reqId + " index- " + index);
-            serverState.moveTransactionToLog(reqId, index);
+            serverState.moveTransactionsToLog(List.of(reqId), index);
             try {
                 serverState.execution_lock.lock();
                 serverState.execution_condition.signal();

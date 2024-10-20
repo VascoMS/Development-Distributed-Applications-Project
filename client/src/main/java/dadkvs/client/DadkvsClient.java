@@ -13,6 +13,9 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.Random;
 import java.util.Scanner;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 
 public class DadkvsClient {
@@ -23,8 +26,9 @@ public class DadkvsClient {
     int loop_size;
     int n_servers;
     int client_id;
-    int sequence_number;
+    AtomicInteger sequence_number;
     int responses_needed;
+    ExecutorService commitExecutor;
     Random rnd;
     String host;
     int port;
@@ -43,10 +47,11 @@ public class DadkvsClient {
         this.client_id = 1;
         this.port = 8080;
         this.host = "localhost";
-        this.sequence_number = 0;
+        this.sequence_number = new AtomicInteger(0);
         this.responses_needed = 1;
         this.rnd = new Random();
         this.targets = new String[n_servers];
+        this.commitExecutor = Executors.newFixedThreadPool(10);
     }
 
     public static void main(String[] args) throws Exception {
@@ -58,8 +63,7 @@ public class DadkvsClient {
     }
 
     private boolean doCommit(int key1, int key1_version, int key2, int key2_version, int write_key, int write_value) {
-        sequence_number = sequence_number + 1;
-        int reqid = sequence_number * 100 + client_id;
+        int reqid = sequence_number.incrementAndGet() * 100 + client_id;
         boolean result = false;
 
         DadkvsMain.CommitRequest.Builder commit_request = DadkvsMain.CommitRequest.newBuilder();
@@ -102,8 +106,7 @@ public class DadkvsClient {
     }
 
     private VersionedValue doRead(int key) {
-        sequence_number = sequence_number + 1;
-        int reqid = sequence_number * 100 + client_id;
+        int reqid = sequence_number.incrementAndGet() * 100 + client_id;
 
         DadkvsMain.ReadRequest.Builder read_request = DadkvsMain.ReadRequest.newBuilder();
         ;
@@ -139,30 +142,7 @@ public class DadkvsClient {
         System.out.println("going to run " + loop_size + " transactions with key range = " + key_range + " sleep delay range = " + sleep_range);
 
         while (counter < loop_size) {
-            int write_key = rnd.nextInt(key_range) + 1;
-            int write_value = rnd.nextInt(1000);
-
-            // read key 1
-            int read_key1 = rnd.nextInt(key_range) + 1;
-            VersionedValue kv_entry1 = doRead(read_key1);
-            if (kv_entry1 == null) {
-                System.out.println("Panic! ..");
-                return;
-            }
-            Thread.sleep(rnd.nextInt(sleep_range) * 1000);
-
-            // read key 2
-            int read_key2 = rnd.nextInt(key_range) + 1;
-            VersionedValue kv_entry2 = doRead(read_key2);
-            if (kv_entry2 == null) {
-                System.out.println("Panic! ..");
-                return;
-            }
-            Thread.sleep(rnd.nextInt(sleep_range) * 1000);
-
-
-            System.out.println("Commiting transaction number " + (counter + 1));
-            if (doCommit(read_key1, kv_entry1.getVersion(), read_key2, kv_entry2.getVersion(), write_key, write_value))
+            if (doTransaction(counter))
                 committed++;
             Thread.sleep(rnd.nextInt(sleep_range) * 1000);
             counter++;
@@ -170,6 +150,34 @@ public class DadkvsClient {
         System.out.println("loop done. transactions committed = " + committed + ". transactions aborted = " + (loop_size - committed) + ".");
 
     }
+
+    private boolean doTransaction(int counter) throws Exception{
+        int write_key = rnd.nextInt(key_range) + 1;
+        int write_value = rnd.nextInt(1000);
+
+        // read key 1
+        int read_key1 = rnd.nextInt(key_range) + 1;
+        VersionedValue kv_entry1 = doRead(read_key1);
+        if (kv_entry1 == null) {
+            System.out.println("Panic! ..");
+            return false;
+        }
+        Thread.sleep(rnd.nextInt(sleep_range) * 1000L);
+
+        // read key 2
+        int read_key2 = rnd.nextInt(key_range) + 1;
+        VersionedValue kv_entry2 = doRead(read_key2);
+        if (kv_entry2 == null) {
+            System.out.println("Panic! ..");
+            return false;
+        }
+        Thread.sleep(rnd.nextInt(sleep_range) * 1000L);
+
+        System.out.println("Commiting transaction number " + (counter + 1));
+        return doCommit(read_key1, kv_entry1.getVersion(), read_key2, kv_entry2.getVersion(), write_key, write_value);
+    }
+
+
 
     private void initComms() {
         // Let us use plaintext communication because we do not have certificates
@@ -374,9 +382,21 @@ public class DadkvsClient {
                     } catch (Exception e) {
                     }
                     break;
+                case "dump":
+                    try {
+                        for(int i = 0; i < loop_size; i++){
+                            System.out.println("Running transaction number: " + (i + 1));
+                            int finalI = i;
+                            commitExecutor.submit(() -> doTransaction(finalI));
+                        }
+                    } catch (Exception e) {
+                        System.out.println("Panic! ..");
+                    }
+                    break;
                 case "exit":
                     keep_going = false;
                     break;
+
                 case "":
                     break;
                 default:

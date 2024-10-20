@@ -7,7 +7,6 @@ import io.grpc.Context;
 import io.grpc.stub.StreamObserver;
 
 import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
 
 public class DadkvsPaxosServiceImpl extends DadkvsPaxosServiceGrpc.DadkvsPaxosServiceImplBase {
 
@@ -24,10 +23,21 @@ public class DadkvsPaxosServiceImpl extends DadkvsPaxosServiceGrpc.DadkvsPaxosSe
     }
 
     @Override
-    public void phaseone(DadkvsPaxos.PhaseOneRequest request, StreamObserver<DadkvsPaxos.PhaseOneReply> responseObserver) {
+    public void phaseone(DadkvsPaxos.MultiPaxosPhaseOneRequest request, StreamObserver<DadkvsPaxos.MultiPaxosPhaseOneResponse> responseObserver) {
         // for debug purposes
         System.out.println("Receive phase1 request: " + request);
         debugHandler.runDebug(server_state.debug_mode, false);
+        DadkvsPaxos.MultiPaxosPhaseOneResponse.Builder multiPaxosPhaseOneResponse =
+                DadkvsPaxos.MultiPaxosPhaseOneResponse.newBuilder();
+        for(DadkvsPaxos.PhaseOneRequest singleRoundRequest : request.getRequestList()){
+            DadkvsPaxos.PhaseOneReply response = processPhaseOneRequest(singleRoundRequest);
+            multiPaxosPhaseOneResponse.addResponse(response);
+        }
+        responseObserver.onNext(multiPaxosPhaseOneResponse.build());
+        responseObserver.onCompleted();
+    }
+
+    private DadkvsPaxos.PhaseOneReply processPhaseOneRequest(DadkvsPaxos.PhaseOneRequest request) {
         DadkvsPaxos.PhaseOneReply phase_one_response;
         int reqIndex = request.getPhase1Index();
         int reqTS = request.getPhase1Timestamp();
@@ -52,12 +62,12 @@ public class DadkvsPaxosServiceImpl extends DadkvsPaxosServiceGrpc.DadkvsPaxosSe
         } finally {
             paxosRoundLock.unlock();
         }
-        responseObserver.onNext(phase_one_response);
-        responseObserver.onCompleted();
+
+        return phase_one_response;
     }
 
-    private synchronized PaxosRoundState getOrInitPaxosRoundState(int round){
-        if(!server_state.paxos_round_state_map.containsKey(round)){
+    private synchronized PaxosRoundState getOrInitPaxosRoundState(int round) {
+        if (!server_state.paxos_round_state_map.containsKey(round)) {
             server_state.paxos_round_state_map.put(round, new PaxosRoundState());
         }
         return server_state.paxos_round_state_map.get(round);
@@ -65,7 +75,7 @@ public class DadkvsPaxosServiceImpl extends DadkvsPaxosServiceGrpc.DadkvsPaxosSe
 
     private void updatePrepareTimestampState(int index, int newPrepareTS) {
         TimestampState tsState = server_state.getTimestampState(index);
-        if(tsState == null){
+        if (tsState == null) {
             tsState = new TimestampState(server_state.my_id);
             PaxosRoundState newPaxosRoundState = new PaxosRoundState();
             newPaxosRoundState.setTimestampState(tsState);
@@ -77,7 +87,7 @@ public class DadkvsPaxosServiceImpl extends DadkvsPaxosServiceGrpc.DadkvsPaxosSe
 
     private void updateAcceptTimestampState(int index, int newAcceptTS) {
         TimestampState tsState = server_state.getTimestampState(index);
-        if(tsState == null){
+        if (tsState == null) {
             tsState = new TimestampState(server_state.my_id);
             PaxosRoundState newPaxosRoundState = new PaxosRoundState();
             newPaxosRoundState.setTimestampState(tsState);
@@ -109,10 +119,20 @@ public class DadkvsPaxosServiceImpl extends DadkvsPaxosServiceGrpc.DadkvsPaxosSe
     }
 
     @Override
-    public void phasetwo(DadkvsPaxos.PhaseTwoRequest request, StreamObserver<DadkvsPaxos.PhaseTwoReply> responseObserver) {
+    public void phasetwo(DadkvsPaxos.MultiPaxosPhaseTwoRequest request, StreamObserver<DadkvsPaxos.MultiPaxosPhaseTwoResponse> responseObserver) {
         // for debug purposes
         System.out.println("Receive phase two request: " + request);
         debugHandler.runDebug(server_state.debug_mode, false);
+        DadkvsPaxos.MultiPaxosPhaseTwoResponse.Builder multiPaxosPhaseTwoResponse = DadkvsPaxos.MultiPaxosPhaseTwoResponse.newBuilder();
+        for(DadkvsPaxos.PhaseTwoRequest singleRoundRequest : request.getRequestList()){
+            DadkvsPaxos.PhaseTwoReply response = processPhaseTwoRequest(singleRoundRequest);
+            multiPaxosPhaseTwoResponse.addResponse(response);
+        }
+        responseObserver.onNext(multiPaxosPhaseTwoResponse.build());
+        responseObserver.onCompleted();
+    }
+
+    private DadkvsPaxos.PhaseTwoReply processPhaseTwoRequest(DadkvsPaxos.PhaseTwoRequest request){
         DadkvsPaxos.PhaseTwoReply.Builder phase_two_response = DadkvsPaxos.PhaseTwoReply.newBuilder();
         int reqIndex = request.getPhase2Index();
         int reqTS = request.getPhase2Timestamp();
@@ -137,8 +157,7 @@ public class DadkvsPaxosServiceImpl extends DadkvsPaxosServiceGrpc.DadkvsPaxosSe
         } finally {
             paxosRoundLock.unlock();
         }
-        responseObserver.onNext(phase_two_response.build());
-        responseObserver.onCompleted();
+        return phase_two_response.build();
     }
 
     @Override

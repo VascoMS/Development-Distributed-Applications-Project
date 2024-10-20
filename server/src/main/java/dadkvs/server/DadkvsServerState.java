@@ -7,41 +7,42 @@ import dadkvs.util.GenericResponseCollector;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 
-import java.util.*;
-import java.util.concurrent.*;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.stream.Collectors;
 
 public class DadkvsServerState {
+    // TODO: Check why tf there are nulls in the log and some servers aren't executing all requests. Debug with reconfigs
     private static final int DEFAULT_CONFIG = 0;
     private static final int BLANK_ENTRY = -1;
     private static final int NUM_MULTIPAXOS_ROUNDS = 5;
     public final Lock execution_lock;
     public final Condition execution_condition;
     public final Lock leader_lock;
+    public final List<Integer> transaction_execution_log;
+    public final int[][] configuration_matrix;
+    public final Condition reconfig_condition;
     private final ConcurrentLinkedQueue<RequestQueueEntry> request_queue;
     private final ConcurrentHashMap<Integer, CompletableFuture<Boolean>> request_future_map;
     private final ConcurrentHashMap<Integer, PaxosRequestEntry> transaction_consensus_map;
-    ConcurrentHashMap<Integer, PaxosRoundState> paxos_round_state_map;
-    public final List<Integer> transaction_execution_log;
-    private int current_config;
-    public final int[][] configuration_matrix;
     //private final Lock queue_lock;
     private final Condition empty_queue_condition;
     private final Condition i_am_leader_condition;
-    public final Condition reconfig_condition;
-    private final ExecutorService paxos_leader_executor;
+    ConcurrentHashMap<Integer, PaxosRoundState> paxos_round_state_map;
     boolean i_am_leader;
     int debug_mode;
     int base_port;
     int my_id;
     int store_size;
     int total_num_servers;
-    // TODO: Implement new current index logic
     int current_index;
-
     String default_host;
     KeyValueStore store;
     //MainLoop main_loop;
@@ -49,6 +50,7 @@ public class DadkvsServerState {
     Thread execution_worker;
     DadkvsPaxosServiceGrpc.DadkvsPaxosServiceStub[] async_paxos_stubs;
     String[] paxos_targets;
+    private int current_config;
 
 
     public DadkvsServerState(int kv_size, int port, int myself) {
@@ -72,7 +74,6 @@ public class DadkvsServerState {
         execution_condition = execution_lock.newCondition();
         current_config = DEFAULT_CONFIG;
         configuration_matrix = new int[][]{{0, 1, 2}, {1, 2, 3}, {2, 3, 4}};
-        paxos_leader_executor = Executors.newFixedThreadPool(NUM_MULTIPAXOS_ROUNDS);
 
         store_size = kv_size;
         store = new KeyValueStore(kv_size);
@@ -98,14 +99,7 @@ public class DadkvsServerState {
             try {
                 if (i_am_leader) {
                     if (!request_queue.isEmpty()) {
-                        RequestQueueEntry nextRequestToPropose = request_queue.peek();
-
-                        moveTransactionToMap(nextRequestToPropose.getReqid(), RequestState.AWAITING_PROPOSAL);
-                        paxos_leader_executor.submit(() -> runAsLeader(nextRequestToPropose));
-
-                        if(nextRequestToPropose.getTransactionRecord().isReconfigTransaction()){
-                            reconfig_condition.await();
-                        }
+                        runAsLeader();
                     } else {
                         // Waiting for queue to have transactions to be proposed
                         empty_queue_condition.await();
@@ -115,6 +109,8 @@ public class DadkvsServerState {
                 }
             } catch (InterruptedException e) {
                 System.out.println("Thread Interrupted");
+            } catch (Exception e) {
+                System.err.println("Exception thrown: " + e.getMessage());
             } finally {
                 leader_lock.unlock();
             }
@@ -132,79 +128,113 @@ public class DadkvsServerState {
         }
     }
 
-    public CompletableFuture<Boolean> waitForTransactionExecution(Integer reqid) {
+    public CompletableFuture<Boolean> waitForTransactionExecution(Integer reqId, TransactionRecord txRecord) {
         CompletableFuture<Boolean> transaction_result_future = new CompletableFuture<>();
-        request_future_map.put(reqid, transaction_result_future);
+        request_future_map.put(reqId, transaction_result_future);
+        addTransactionRecordToQueue(reqId, txRecord);
         return transaction_result_future;
     }
 
-    private int getMajority(){
+    private int getMajority() {
         return configuration_matrix[current_config].length / 2 + 1;
     }
 
-    private void runAsLeader(RequestQueueEntry requestQueueEntry) {
+    private synchronized List<RequestQueueEntry> buildRequestBatch() {
+        List<RequestQueueEntry> newRequestBatch = new ArrayList<>();
+        System.out.println("Queue when building batch: " + request_queue.toString());
+        // Building a request batch based on the queue size, the max batch size and the number of
+        // contiguous empty slots available in the log from the current index
+        for (int i = 0; !request_queue.isEmpty() && newRequestBatch.size() < NUM_MULTIPAXOS_ROUNDS && isIndexEmpty(current_index + i); i++) {
+            //Taking the request out the queue, adding it into the requestBatch and incrementing the fakeIndex
+            RequestQueueEntry currentRequest = request_queue.peek();
+            // If learner fetched the last request from the queue after we check if queue is empty, we can break the loop
+            // and return the batch
+            if(currentRequest == null) {
+                break;
+            }
+            newRequestBatch.add(currentRequest);
+            moveTransactionToMap(currentRequest.getReqid(), RequestState.AWAITING_PROPOSAL);
+
+            //if its a reconfig, we added it into the batch, but stopped adding stuff afterwards
+            if (currentRequest.getTransactionRecord().isReconfigTransaction()) {
+                break;
+            }
+        }
+
+        return newRequestBatch;
+    }
+
+
+    private void runAsLeader() {
         boolean reached_consensus = false;
         int index = updateIndex();
         loadConfiguration(index);
-        initPaxosRoundStateAsLeader(index);
+        List<RequestQueueEntry> requestBatch = buildRequestBatch();
+        int batchSize = requestBatch.size();
+        initPaxosRoundStatesAsLeader(index, batchSize);
         System.out.println("Config loaded: " + current_config);
+        System.out.println("Log before starting new consensus batch: " + transaction_execution_log);
         while (!reached_consensus && i_am_leader && isIndexEmpty(index)) {
-            List<DadkvsPaxos.PhaseOneReply> phase_one_responses = new ArrayList<>();
-            GenericResponseCollector<DadkvsPaxos.PhaseOneReply> phase_one_collector =
+            List<DadkvsPaxos.MultiPaxosPhaseOneResponse> phase_one_responses = new ArrayList<>();
+            GenericResponseCollector<DadkvsPaxos.MultiPaxosPhaseOneResponse> phase_one_collector =
                     new GenericResponseCollector<>(phase_one_responses, total_num_servers);
-            List<DadkvsPaxos.PhaseTwoReply> phase_two_responses = new ArrayList<>();
-            GenericResponseCollector<DadkvsPaxos.PhaseTwoReply> phase_two_collector =
+            List<DadkvsPaxos.MultiPaxosPhaseTwoResponse> phase_two_responses = new ArrayList<>();
+            GenericResponseCollector<DadkvsPaxos.MultiPaxosPhaseTwoResponse> phase_two_collector =
                     new GenericResponseCollector<>(phase_two_responses, total_num_servers);
 
             System.out.println("Queue size in leader: " + request_queue.size());
-            phase_one_responses.clear();
-            runPhase1(phase_one_collector, buildPhaseOneRequest(index));
+            runPhase1(phase_one_collector, buildPhaseOneRequest(index, batchSize));
             phase_one_collector.waitForTarget(getMajority());
             System.out.println("Number of responses: " + phase_one_collector.getReceived() + " Pending: " + phase_one_collector.getPending());
-            System.out.println("RESPONSES: " + phase_one_responses.stream().map(DadkvsPaxos.PhaseOneReply::toString).collect(Collectors.toList()));
 
-            boolean redo = handlePhaseOneResponses(phase_one_responses, index);
+            // TODO: Implement multithreading for handling phase 1 responses and picking values
+            boolean redo = handlePhaseOneResponses(phase_one_responses, index, batchSize);
             if (redo)
                 continue;
             if (phase_one_responses.size() >= getMajority()) {
-                int chosen_value = pickValue(phase_one_responses, requestQueueEntry.getReqid());
-                runPhase2(phase_two_collector, buildPhaseTwoRequest(chosen_value, index));
+                List<Integer> chosen_values = pickAllValues(phase_one_responses, requestBatch);
+                runPhase2(phase_two_collector, buildPhaseTwoRequest(chosen_values, index));
                 phase_two_collector.waitForTarget(getMajority());
                 System.out.println("Number of responses: " + phase_two_collector.getReceived() + " Pending: " + phase_one_collector.getPending());
-                System.out.println("RESPONSES: " + phase_two_responses.stream().map(DadkvsPaxos.PhaseTwoReply::toString).collect(Collectors.toList()));
-
-                redo = handlePhaseTwoResponses(phase_two_responses, index) ;
+                redo = handlePhaseTwoResponses(phase_two_responses, index, chosen_values.size());
                 if (redo)
                     continue;
                 if (phase_two_responses.size() >= getMajority()) {
                     reached_consensus = true;
-                    moveTransactionToLog(chosen_value, index);
-                    if(chosen_value != requestQueueEntry.getReqid())
-                        returnRequestToQueue(requestQueueEntry);
+                    moveTransactionsToLog(chosen_values, index);
+                    returnRequestsToQueue(requestBatch, chosen_values);
                     removePaxosRoundState(index);
                 }
             }
         }
     }
 
-    private void initPaxosRoundStateAsLeader(int round){
-        PaxosRoundState newRoundState = new PaxosRoundState();
-        newRoundState.getTimestampState().setLeaderTs(my_id);
-        if(!paxos_round_state_map.containsKey(round))
-            paxos_round_state_map.put(round, newRoundState);
+    private void initPaxosRoundStatesAsLeader(int baseRound, int numRequests) {
+        for (int i = 0; i < numRequests; i++) {
+            int currentRound = baseRound + i;
+            PaxosRoundState newRoundState = new PaxosRoundState();
+            newRoundState.getTimestampState().setLeaderTs(my_id);
+            if (!paxos_round_state_map.containsKey(currentRound))
+                paxos_round_state_map.put(currentRound, newRoundState);
+        }
     }
 
-    private void returnRequestToQueue(RequestQueueEntry requestQueueEntry){
+    private void returnRequestsToQueue(List<RequestQueueEntry> requestBatch, List<Integer> chosenValues) {
         //TODO: Confirm whether adding to the end of the queue is bad
-        request_queue.offer(requestQueueEntry);
-        if(requestQueueEntry.getTransactionRecord().isReconfigTransaction())
-            try {
-                leader_lock.lock();
-                reconfig_condition.signal();
-            } finally {
-                leader_lock.unlock();
+        for (RequestQueueEntry requestQueueEntry : requestBatch) {
+            if (chosenValues.stream().noneMatch(reqId -> reqId == requestQueueEntry.getReqid()))
+                request_queue.offer(requestQueueEntry);
+            if (requestQueueEntry.getTransactionRecord().isReconfigTransaction()) {
+                try {
+                    leader_lock.lock();
+                    reconfig_condition.signal();
+                } finally {
+                    leader_lock.unlock();
+                }
             }
+        }
     }
+
 
     public void sendLearnRequests(int index, int value, int timestamp) {
         DadkvsPaxos.LearnRequest.Builder learnRequest = DadkvsPaxos.LearnRequest.newBuilder();
@@ -221,40 +251,50 @@ public class DadkvsServerState {
 
     }
 
-    private boolean handlePhaseOneResponses(List<DadkvsPaxos.PhaseOneReply> phaseOneResponses, int index) {
-        int leader_ts = getLeaderTs(index);
-        int largestTimestamp = leader_ts;
-
-        for (DadkvsPaxos.PhaseOneReply response : phaseOneResponses) {
-            // Update largest timestamp if response is not accepted
-            if (!response.getPhase1Accepted()) {
-                largestTimestamp = Math.max(largestTimestamp, response.getPhase1Timestamp());
+    private boolean handlePhaseOneResponses(List<DadkvsPaxos.MultiPaxosPhaseOneResponse> phaseOneResponses, int index, int batchSize) {
+        boolean rejected = false;
+        for (int i = 0; i < batchSize; i++) {
+            int currentIndex = index + i;
+            int leader_ts = getLeaderTs(currentIndex);
+            int largestTimestamp = leader_ts;
+            for (DadkvsPaxos.MultiPaxosPhaseOneResponse multiPaxosResponse : phaseOneResponses) {
+                // Update largest timestamp if response is not accepted
+                DadkvsPaxos.PhaseOneReply responseForCurrentIndex = multiPaxosResponse.getResponse(i);
+                if (!responseForCurrentIndex.getPhase1Accepted()) {
+                    largestTimestamp = Math.max(largestTimestamp, responseForCurrentIndex.getPhase1Timestamp());
+                }
+                boolean hasGreaterLeader = largestTimestamp > leader_ts;
+                if (hasGreaterLeader) {
+                    updateLeaderTimestamp(largestTimestamp, index);
+                }
+                rejected = rejected || hasGreaterLeader;
             }
         }
-
-        boolean hasGreaterLeader = largestTimestamp > leader_ts;
-        if (hasGreaterLeader) {
-            updateLeaderTimestamp(largestTimestamp, index);
-        }
-
-        return hasGreaterLeader;
+        return rejected;
     }
 
-    private boolean handlePhaseTwoResponses(List<DadkvsPaxos.PhaseTwoReply> phaseTwoResponses, int index) {
-        int leader_ts = getLeaderTs(index);
-        int largestTimestamp = leader_ts;
-        for (DadkvsPaxos.PhaseTwoReply response : phaseTwoResponses) {
-            if (!response.getPhase2Accepted()) {
-                largestTimestamp = Math.max(largestTimestamp, response.getPhase2Timestamp());
+    private boolean handlePhaseTwoResponses(List<DadkvsPaxos.MultiPaxosPhaseTwoResponse> phaseTwoResponses, int index, int batchSize) {
+        boolean rejected = false;
+        for (int i = 0; i < batchSize; i++) {
+            int currentIndex = index + i;
+            int leader_ts = getLeaderTs(currentIndex);
+            int largestTimestamp = leader_ts;
+            for (DadkvsPaxos.MultiPaxosPhaseTwoResponse multiPaxosResponse : phaseTwoResponses) {
+                DadkvsPaxos.PhaseTwoReply responseForCurrentIndex = multiPaxosResponse.getResponse(i);
+                if (!responseForCurrentIndex.getPhase2Accepted()) {
+                    largestTimestamp = Math.max(largestTimestamp, responseForCurrentIndex.getPhase2Timestamp());
+                }
+                boolean hasGreaterLeader = largestTimestamp > leader_ts;
+                if (hasGreaterLeader) {
+                    updateLeaderTimestamp(largestTimestamp, index);
+                }
+                rejected = rejected || hasGreaterLeader;
             }
         }
-        boolean hasGreaterLeader = largestTimestamp > leader_ts;
-        if (hasGreaterLeader) {
-            updateLeaderTimestamp(largestTimestamp, index);
-        }
-        return hasGreaterLeader;
+        return rejected;
     }
 
+    // Puts nulls in the log, so we can add transactions in their correct index (ArrayList)
     private void fillTransactionLog(int endIndex) {
         for (int i = transaction_execution_log.size(); i < endIndex; i++) {
             addTransactionToLog(null, i);
@@ -269,27 +309,37 @@ public class DadkvsServerState {
         }
     }
 
-    public synchronized void moveTransactionToLog(int reqId, int index) {
+    public synchronized void moveTransactionsToLog(List<Integer> reqIds, int index) {
+        System.out.println("Queue size when moving to log: " + request_queue.size());
+        // Filling transaction log with nulls to accommodate the start of the received batch in the log.
+        fillTransactionLog(index);
+        for (int i = 0; i < reqIds.size(); i++) {
+            moveTransactionToMap(reqIds.get(i), RequestState.PENDING_EXECUTION);
+            addTransactionToLog(reqIds.get(i), index + i);
+        }
+    }
+
+    /*public synchronized void moveTransactionToLog(int reqId, int index) {
         System.out.println("Queue size when moving to log: " + request_queue.size());
         moveTransactionToMap(reqId, RequestState.PENDING_EXECUTION);
         fillTransactionLog(index);
         addTransactionToLog(reqId, index);
-    }
+    }*/
 
-    public synchronized void moveTransactionToMap(int reqId, RequestState requestState){
+    public synchronized void moveTransactionToMap(int reqId, RequestState requestState) {
         RequestQueueEntry req = findAndRemoveFromQueue(reqId);
         if (req != null) {
             transaction_consensus_map.put(reqId, new PaxosRequestEntry(req.getTransactionRecord(), requestState));
-        } else if(!transaction_consensus_map.containsKey(reqId)) {
+        } else if (!transaction_consensus_map.containsKey(reqId)) {
             transaction_consensus_map.put(reqId, new PaxosRequestEntry());
-        } else if (!transaction_consensus_map.get(reqId).getRequestState().equals(requestState)){
+        } else if (!transaction_consensus_map.get(reqId).getRequestState().equals(requestState)) {
             transaction_consensus_map.get(reqId).setRequestState(requestState);
         }
     }
 
-    public RequestQueueEntry findAndRemoveFromQueue(int reqId){
-        for(RequestQueueEntry entry : request_queue){
-            if(entry.getReqid() == reqId)
+    public RequestQueueEntry findAndRemoveFromQueue(int reqId) {
+        for (RequestQueueEntry entry : request_queue) {
+            if (entry.getReqid() == reqId)
                 request_queue.remove(entry);
             return entry;
         }
@@ -297,26 +347,38 @@ public class DadkvsServerState {
     }
 
 
-    public DadkvsPaxos.PhaseOneRequest buildPhaseOneRequest(int index) {
-        DadkvsPaxos.PhaseOneRequest.Builder phase_one_request = DadkvsPaxos.PhaseOneRequest.newBuilder();
+    public DadkvsPaxos.MultiPaxosPhaseOneRequest buildPhaseOneRequest(int baseIndex, int batchSize) {
+        DadkvsPaxos.MultiPaxosPhaseOneRequest.Builder multiPaxosRequest =
+                DadkvsPaxos.MultiPaxosPhaseOneRequest.newBuilder();
+        for (int i = 0; i < batchSize; i++) {
+            DadkvsPaxos.PhaseOneRequest.Builder phase_one_request = DadkvsPaxos.PhaseOneRequest.newBuilder();
+            int currentIndex = baseIndex + i;
+            phase_one_request
+                    .setPhase1Config(current_config)
+                    .setPhase1Index(currentIndex)
+                    .setPhase1Timestamp(getLeaderTs(baseIndex));
 
-        phase_one_request
-                .setPhase1Config(0)
-                .setPhase1Index(index)
-                .setPhase1Timestamp(getLeaderTs(index));
+            multiPaxosRequest.addRequest(phase_one_request.build());
+        }
 
-        return phase_one_request.build();
+        return multiPaxosRequest.build();
     }
 
-    public DadkvsPaxos.PhaseTwoRequest buildPhaseTwoRequest(int value, int index) {
-        DadkvsPaxos.PhaseTwoRequest.Builder phase_two_request = DadkvsPaxos.PhaseTwoRequest.newBuilder();
+    public DadkvsPaxos.MultiPaxosPhaseTwoRequest buildPhaseTwoRequest(List<Integer> values, int baseIndex) {
+        DadkvsPaxos.MultiPaxosPhaseTwoRequest.Builder multiPaxosRequest =
+                DadkvsPaxos.MultiPaxosPhaseTwoRequest.newBuilder();
+        for (int i = 0; i < values.size(); i++) {
+            int currentIndex = baseIndex + i;
+            DadkvsPaxos.PhaseTwoRequest.Builder phase_two_request = DadkvsPaxos.PhaseTwoRequest.newBuilder();
+            phase_two_request
+                    .setPhase2Config(current_config)
+                    .setPhase2Timestamp(getLeaderTs(currentIndex))
+                    .setPhase2Index(currentIndex)
+                    .setPhase2Value(values.get(i));
 
-        phase_two_request.setPhase2Config(0)
-                .setPhase2Timestamp(getLeaderTs(index))
-                .setPhase2Index(index)
-                .setPhase2Value(value);
-
-        return phase_two_request.build();
+            multiPaxosRequest.addRequest(phase_two_request);
+        }
+        return multiPaxosRequest.build();
     }
 
     private void updateLeaderTimestamp(int response_ts, int index) {
@@ -347,37 +409,59 @@ public class DadkvsServerState {
 
     }
 
-    private void runPhase1(GenericResponseCollector<DadkvsPaxos.PhaseOneReply> phase_one_collector, DadkvsPaxos.PhaseOneRequest request) {
+    private void runPhase1(GenericResponseCollector<DadkvsPaxos.MultiPaxosPhaseOneResponse> phase_one_collector, DadkvsPaxos.MultiPaxosPhaseOneRequest request) {
         for (int serverIndex : configuration_matrix[current_config]) {
             System.out.println("Leader sending phase 1 request: ");
             DadkvsPaxosServiceGrpc.DadkvsPaxosServiceStub stub = async_paxos_stubs[serverIndex];
             CollectorStreamObserver.printMessageFields(request);
-            CollectorStreamObserver<DadkvsPaxos.PhaseOneReply> phase_one_observer = new CollectorStreamObserver<>(phase_one_collector);
+            CollectorStreamObserver<DadkvsPaxos.MultiPaxosPhaseOneResponse> phase_one_observer =
+                    new CollectorStreamObserver<>(phase_one_collector);
             stub.phaseone(request, phase_one_observer);
         }
     }
 
-    private void runPhase2(GenericResponseCollector<DadkvsPaxos.PhaseTwoReply> phase_two_collector, DadkvsPaxos.PhaseTwoRequest request) {
+    private void runPhase2(GenericResponseCollector<DadkvsPaxos.MultiPaxosPhaseTwoResponse> phase_two_collector, DadkvsPaxos.MultiPaxosPhaseTwoRequest request) {
         for (int serverIndex : configuration_matrix[current_config]) {
             System.out.println("Leader sending phase 2 request:\n" + request);
             DadkvsPaxosServiceGrpc.DadkvsPaxosServiceStub stub = async_paxos_stubs[serverIndex];
             CollectorStreamObserver.printMessageFields(request);
-            CollectorStreamObserver<DadkvsPaxos.PhaseTwoReply> phase_two_observer = new CollectorStreamObserver<>(phase_two_collector);
+            CollectorStreamObserver<DadkvsPaxos.MultiPaxosPhaseTwoResponse> phase_two_observer =
+                    new CollectorStreamObserver<>(phase_two_collector);
             stub.phasetwo(request, phase_two_observer);
         }
+    }
+
+    private List<Integer> pickAllValues(List<DadkvsPaxos.MultiPaxosPhaseOneResponse> responses, List<RequestQueueEntry> requestBatch) {
+        List<Integer> pickedValues = new ArrayList<>();
+        for (int i = 0; i < requestBatch.size(); i++) {
+            List<DadkvsPaxos.PhaseOneReply> currentIndexResponses = new ArrayList<>();
+            for (DadkvsPaxos.MultiPaxosPhaseOneResponse response : responses) {
+                currentIndexResponses.add(response.getResponse(i));
+            }
+            int pickedValue = pickValue(currentIndexResponses, requestBatch.get(i).getReqid());
+            pickedValues.add(pickedValue);
+            // If a reconfig is returned in a read we have to prune the batch we are proposing after the reconfig
+            if(isReconfigByReqId(pickedValue))
+                break;
+        }
+        return pickedValues;
     }
 
     private int pickValue(List<DadkvsPaxos.PhaseOneReply> responses, int reqId) {
         // Retrieving the response with the largest accepted timestamp
         int largestTimestamp = 0;
         int acceptedValue = 0;
-        for(DadkvsPaxos.PhaseOneReply response : responses){
-            if(response.getPhase1Timestamp() > largestTimestamp){
+        for (DadkvsPaxos.PhaseOneReply response : responses) {
+            if (response.getPhase1Timestamp() > largestTimestamp) {
                 largestTimestamp = response.getPhase1Timestamp();
                 acceptedValue = response.getPhase1Value();
             }
         }
         return largestTimestamp > 0 ? acceptedValue : reqId;
+    }
+
+    private boolean isReconfigByReqId(int reqId){
+        return reqId % 10 == 0;
     }
 
     public boolean transactionAvailable(int reqId) {
@@ -386,7 +470,7 @@ public class DadkvsServerState {
 
     public boolean previousTransactionComplete(int index) {
         System.out.println("Checking previous transaction for index: " + index);
-        if(index == 0)
+        if (index == 0)
             return true;
         int reqId = getValueFromLog(index - 1);
         return reqId != -1 && transaction_consensus_map.get(reqId).hasCompleted();
@@ -416,7 +500,7 @@ public class DadkvsServerState {
         request_future_map.remove(reqId);
     }
 
-    public int getValueFromLog(int index){
+    public int getValueFromLog(int index) {
         return index < transaction_execution_log.size() &&
                 transaction_execution_log.get(index) != null ? transaction_execution_log.get(index) : -1;
     }
@@ -425,8 +509,8 @@ public class DadkvsServerState {
         return index > transaction_execution_log.size() - 1 || transaction_execution_log.get(index) == null;
     }
 
-    public void removePaxosRoundState(int index){
-        if(paxos_round_state_map.get(index) == null)
+    public void removePaxosRoundState(int index) {
+        if (paxos_round_state_map.get(index) == null)
             return;
         Lock paxosStateLock = paxos_round_state_map.get(index).getPaxosStateLock();
         try {
@@ -438,41 +522,42 @@ public class DadkvsServerState {
         }
     }
 
-    public void addAcceptedValue(int index, int value){
+    public void addAcceptedValue(int index, int value) {
         paxos_round_state_map.get(index).setUncommitedAcceptedRequest(value);
     }
 
-    public synchronized int updateIndex(){
+    public synchronized int updateIndex() {
         current_index = findNextFreeIndex(current_index + 1);
         return current_index;
     }
 
-    private int findNextFreeIndex(int i){
-        while(i < transaction_execution_log.size() && transaction_execution_log.get(i) != null) {
+    private int findNextFreeIndex(int i) {
+        while (i < transaction_execution_log.size() && transaction_execution_log.get(i) != null) {
             i++;
         }
         return i;
     }
 
-    public int getUncommitedConsensusAccept(int index){
+    public int getUncommitedConsensusAccept(int index) {
         PaxosRoundState paxosRoundState = paxos_round_state_map.get(index);
         return paxosRoundState != null ? paxosRoundState.getUncommitedAcceptedRequest() : -1;
     }
 
-    private boolean isReconfig(int index){
+    private boolean isReconfig(int index) {
         int reqId = getValueFromLog(index);
         return reqId != -1 &&
                 transaction_consensus_map
-                .get(reqId)
-                .getTransactionRecord()
-                .isReconfigTransaction();
+                        .get(reqId)
+                        .getTransactionRecord()
+                        .isReconfigTransaction();
     }
+
 
     public boolean isPartOfConfig(int id, int[] config) {
         return Arrays.stream(config).anyMatch(member -> member == id);
     }
 
-    public synchronized void loadConfiguration(int index){
+    public synchronized void loadConfiguration(int index) {
         // If we find a request that is completed before we find an incomplete reconfiguration, we can set the current configuration to what is in key 0
         // else if we find an incomplete reconfiguration, we set the current configuration to the respective configuration
         for (int i = index; i > 0; i--) {
@@ -493,18 +578,18 @@ public class DadkvsServerState {
                 break;
             }
         }
-        if(!isPartOfConfig(my_id, configuration_matrix[current_config])){
+        if (!isPartOfConfig(my_id, configuration_matrix[current_config])) {
             i_am_leader = false;
         }
     }
 
-    public TimestampState getTimestampState(int round){
+    public TimestampState getTimestampState(int round) {
         return paxos_round_state_map.get(round) != null ? paxos_round_state_map.get(round).getTimestampState() : null;
     }
 
-    public int getTimestamp(int reqIndex, TimestampEnum timestampType){
+    public int getTimestamp(int reqIndex, TimestampEnum timestampType) {
         TimestampState timestampState = paxos_round_state_map.get(reqIndex).getTimestampState();
-        if (timestampState == null){
+        if (timestampState == null) {
             return -1;
         }
         return switch (timestampType) {
@@ -515,20 +600,21 @@ public class DadkvsServerState {
         };
     }
 
-    private int getLeaderTs(int round){
+    private int getLeaderTs(int round) {
         return paxos_round_state_map.get(round).getTimestampState().getLeaderTs();
     }
 
-    private void executor(){
+    private void executor() {
         int currentIndexWithRequestToExecute = findNextIndexWithRequestToExecute(0);
-        while(true){
+        while (true) {
             try {
                 execution_lock.lock();
-                if(isIndexEmpty(currentIndexWithRequestToExecute) ||
-                        !getRequestEntryFromIndex(currentIndexWithRequestToExecute).transactionIsAvailable()){
-                        execution_condition.await();
+                if (isIndexEmpty(currentIndexWithRequestToExecute) ||
+                        !getRequestEntryFromIndex(currentIndexWithRequestToExecute).transactionIsAvailable()) {
+                    execution_condition.await();
                 } else {
                     int reqId = getValueFromLog(currentIndexWithRequestToExecute);
+                    System.out.println("Executing Request: " + reqId);
                     PaxosRequestEntry paxosRequestEntry = transaction_consensus_map.get(reqId);
                     TransactionRecord transaction = paxosRequestEntry.getTransactionRecord();
                     transaction.setTimestamp(currentIndexWithRequestToExecute);
@@ -540,7 +626,7 @@ public class DadkvsServerState {
                     }
                     completeClientRequest(reqId, commitSuccessful);
 
-                    if(transaction.isReconfigTransaction()){
+                    if (transaction.isReconfigTransaction()) {
                         try {
                             leader_lock.lock();
                             reconfig_condition.signal();
@@ -558,14 +644,14 @@ public class DadkvsServerState {
         }
     }
 
-    public PaxosRequestEntry getRequestEntryFromIndex(int index){
+    public PaxosRequestEntry getRequestEntryFromIndex(int index) {
         int reqId = getValueFromLog(index);
         return reqId != -1 ? transaction_consensus_map.get(reqId) : null;
     }
 
-    private int findNextIndexWithRequestToExecute(int currentIndex){
+    private int findNextIndexWithRequestToExecute(int currentIndex) {
         int requestInCurrentIndex = getValueFromLog(currentIndex);
-        while(requestInCurrentIndex != -1 && transaction_consensus_map.get(requestInCurrentIndex).hasCompleted()){
+        while (requestInCurrentIndex != -1 && transaction_consensus_map.get(requestInCurrentIndex).hasCompleted()) {
             requestInCurrentIndex = getValueFromLog(++currentIndex);
         }
         return currentIndex;
