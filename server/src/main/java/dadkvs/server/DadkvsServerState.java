@@ -17,6 +17,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.stream.Collectors;
 
 public class DadkvsServerState {
     // TODO: Fix requests being repeated
@@ -141,7 +142,8 @@ public class DadkvsServerState {
 
     private synchronized List<RequestQueueEntry> buildRequestBatch() {
         List<RequestQueueEntry> newRequestBatch = new ArrayList<>();
-        System.out.println("Queue when building batch: " + request_queue.toString());
+        System.out.println("Queue when building batch: " + request_queue.stream().map(RequestQueueEntry::toString)
+                .collect(Collectors.joining(", ")));
         // Building a request batch based on the queue size, the max batch size and the number of
         // contiguous empty slots available in the log from the current index
         for (int i = 0; !request_queue.isEmpty() && newRequestBatch.size() < NUM_MULTIPAXOS_ROUNDS && isIndexEmpty(current_index + i); i++) {
@@ -202,6 +204,7 @@ public class DadkvsServerState {
                     reached_consensus = true;
                     moveTransactionsToLog(chosen_values, index);
                     returnRequestsToQueue(requestBatch, chosen_values);
+                    // TODO: Remove state for all rounds in the batch
                     removePaxosRoundState(index);
                 }
             }
@@ -221,8 +224,9 @@ public class DadkvsServerState {
     private void returnRequestsToQueue(List<RequestQueueEntry> requestBatch, List<Integer> chosenValues) {
         //TODO: Confirm whether adding to the end of the queue is bad
         for (RequestQueueEntry requestQueueEntry : requestBatch) {
-            if (chosenValues.stream().noneMatch(reqId -> reqId == requestQueueEntry.getReqid()))
+            if (chosenValues.stream().noneMatch(reqId -> reqId == requestQueueEntry.getReqid())) {
                 request_queue.offer(requestQueueEntry);
+            }
             if (requestQueueEntry.getTransactionRecord().isReconfigTransaction()) {
                 try {
                     leader_lock.lock();
@@ -338,9 +342,10 @@ public class DadkvsServerState {
 
     public RequestQueueEntry findAndRemoveFromQueue(int reqId) {
         for (RequestQueueEntry entry : request_queue) {
-            if (entry.getReqid() == reqId)
+            if (entry.getReqid() == reqId){
                 request_queue.remove(entry);
-            return entry;
+                return entry;
+            }
         }
         return null;
     }

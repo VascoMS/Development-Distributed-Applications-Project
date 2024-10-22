@@ -16,4 +16,11 @@ public class RequestQueueEntry {
     public TransactionRecord getTransactionRecord() {
         return transactionRecord;
     }
+
+    @Override
+    public String toString() {
+        return "RequestQueueEntry{" +
+                "reqid=" + reqid +
+                '}';
+    }
 }

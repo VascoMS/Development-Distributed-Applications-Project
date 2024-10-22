@@ -146,7 +146,10 @@ public class DadkvsPaxosServiceImpl extends DadkvsPaxosServiceGrpc.DadkvsPaxosSe
                         .setPhase2Index(request.getPhase2Index())
                         .setPhase2Timestamp(server_state.getTimestamp(reqIndex, TimestampEnum.PREPARE));
             } else {
-                phase_two_response.setPhase2Accepted(true);
+                System.out.println("Accepting reqId: " + request.getPhase2Value() + " at index: " + reqIndex);
+                phase_two_response
+                        .setPhase2Accepted(true)
+                        .setPhase2Index(reqIndex);
                 updateAcceptTimestampState(reqIndex, reqTS);
                 server_state.addAcceptedValue(reqIndex, request.getPhase2Value());
                 Context forkedContext = Context.current().fork();
