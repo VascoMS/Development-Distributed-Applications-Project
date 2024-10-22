@@ -19,7 +19,7 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
 public class DadkvsServerState {
-    // TODO: Check why tf there are nulls in the log and some servers aren't executing all requests. Debug with reconfigs
+    // TODO: Fix requests being repeated
     private static final int DEFAULT_CONFIG = 0;
     private static final int BLANK_ENTRY = -1;
     private static final int NUM_MULTIPAXOS_ROUNDS = 5;
@@ -187,7 +187,6 @@ public class DadkvsServerState {
             phase_one_collector.waitForTarget(getMajority());
             System.out.println("Number of responses: " + phase_one_collector.getReceived() + " Pending: " + phase_one_collector.getPending());
 
-            // TODO: Implement multithreading for handling phase 1 responses and picking values
             boolean redo = handlePhaseOneResponses(phase_one_responses, index, batchSize);
             if (redo)
                 continue;
@@ -305,7 +304,7 @@ public class DadkvsServerState {
         if (transaction_execution_log.size() - 1 < index) {
             transaction_execution_log.add(reqid);
         } else if (transaction_execution_log.get(index) == null) {
-            transaction_execution_log.add(index, reqid);
+            transaction_execution_log.set(index, reqid);
         }
     }
 

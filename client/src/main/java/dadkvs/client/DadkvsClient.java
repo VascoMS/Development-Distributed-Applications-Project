@@ -9,12 +9,10 @@ import dadkvs.util.GenericResponseCollector;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.Random;
-import java.util.Scanner;
+import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 
 
@@ -384,10 +382,15 @@ public class DadkvsClient {
                     break;
                 case "dump":
                     try {
+                        List<Future<Boolean>> futures = new ArrayList<>();
                         for(int i = 0; i < loop_size; i++){
                             System.out.println("Running transaction number: " + (i + 1));
                             int finalI = i;
-                            commitExecutor.submit(() -> doTransaction(finalI));
+                            futures.add(commitExecutor.submit(() -> doTransaction(finalI)));
+                        }
+                        for (Future<Boolean> future : futures) {
+                            boolean result = future.get(); // Blocks until task is done
+                            System.out.println("Transaction committed with result: " + result);
                         }
                     } catch (Exception e) {
                         System.out.println("Panic! ..");
