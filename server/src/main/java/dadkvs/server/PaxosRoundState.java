@@ -39,7 +39,6 @@ public class PaxosRoundState {
         return uncommitedAcceptedRequest;
     }
 
-
 }
 
 

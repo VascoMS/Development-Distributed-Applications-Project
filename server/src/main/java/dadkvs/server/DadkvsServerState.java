@@ -13,7 +13,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -23,14 +23,14 @@ public class DadkvsServerState {
     // TODO: Fix requests being repeated
     private static final int DEFAULT_CONFIG = 0;
     private static final int BLANK_ENTRY = -1;
-    private static final int NUM_MULTIPAXOS_ROUNDS = 5;
+    private static final int MAX_BATCH_SIZE = 5;
     public final Lock execution_lock;
     public final Condition execution_condition;
     public final Lock leader_lock;
     public final List<Integer> transaction_execution_log;
     public final int[][] configuration_matrix;
     public final Condition reconfig_condition;
-    private final ConcurrentLinkedQueue<RequestQueueEntry> request_queue;
+    private final PriorityBlockingQueue<RequestQueueEntry> request_queue;
     private final ConcurrentHashMap<Integer, CompletableFuture<Boolean>> request_future_map;
     private final ConcurrentHashMap<Integer, PaxosRequestEntry> transaction_consensus_map;
     //private final Lock queue_lock;
@@ -63,7 +63,7 @@ public class DadkvsServerState {
         debug_mode = 0;
         current_index = -1;
         paxos_round_state_map = new ConcurrentHashMap<>();
-        request_queue = new ConcurrentLinkedQueue<>();
+        request_queue = new PriorityBlockingQueue<>(MAX_BATCH_SIZE,new RequestPriorityComparator());
         request_future_map = new ConcurrentHashMap<>();
         transaction_consensus_map = new ConcurrentHashMap<>();
         transaction_execution_log = new ArrayList<>();
@@ -129,10 +129,10 @@ public class DadkvsServerState {
         }
     }
 
-    public CompletableFuture<Boolean> waitForTransactionExecution(Integer reqId, TransactionRecord txRecord) {
+    public CompletableFuture<Boolean> waitForTransactionExecution(Integer reqId, TransactionRecord txRecord, int priority) {
         CompletableFuture<Boolean> transaction_result_future = new CompletableFuture<>();
         request_future_map.put(reqId, transaction_result_future);
-        addTransactionRecordToQueue(reqId, txRecord);
+        addTransactionRecordToQueue(reqId, txRecord, priority);
         return transaction_result_future;
     }
 
@@ -146,7 +146,7 @@ public class DadkvsServerState {
                 .collect(Collectors.joining(", ")));
         // Building a request batch based on the queue size, the max batch size and the number of
         // contiguous empty slots available in the log from the current index
-        for (int i = 0; !request_queue.isEmpty() && newRequestBatch.size() < NUM_MULTIPAXOS_ROUNDS && isIndexEmpty(current_index + i); i++) {
+        for (int i = 0; !request_queue.isEmpty() && newRequestBatch.size() < MAX_BATCH_SIZE && isIndexEmpty(current_index + i); i++) {
             //Taking the request out the queue, adding it into the requestBatch and incrementing the fakeIndex
             RequestQueueEntry currentRequest = request_queue.peek();
             // If learner fetched the last request from the queue after we check if queue is empty, we can break the loop
@@ -391,8 +391,8 @@ public class DadkvsServerState {
         paxos_round_state_map.get(index).getTimestampState().setLeaderTs(currentLeaderTS);
     }
 
-    public void addTransactionRecordToQueue(Integer reqid, TransactionRecord transactionRecord) {
-        RequestQueueEntry request_queue_entry = new RequestQueueEntry(reqid, transactionRecord);
+    public void addTransactionRecordToQueue(Integer reqid, TransactionRecord transactionRecord, int priority) {
+        RequestQueueEntry request_queue_entry = new RequestQueueEntry(reqid, transactionRecord, priority);
         boolean was_empty = request_queue.isEmpty();
         if (transaction_consensus_map.containsKey(reqid) && !transaction_consensus_map.get(reqid).transactionIsAvailable()) {
             try {

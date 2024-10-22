@@ -6,6 +6,8 @@ import dadkvs.DadkvsMain;
 import dadkvs.DadkvsMainServiceGrpc;
 import io.grpc.stub.StreamObserver;
 
+import java.util.concurrent.atomic.AtomicInteger;
+
 
 public class DadkvsMainServiceImpl extends DadkvsMainServiceGrpc.DadkvsMainServiceImplBase {
 
@@ -13,10 +15,13 @@ public class DadkvsMainServiceImpl extends DadkvsMainServiceGrpc.DadkvsMainServi
 
     DebugHandler debugHandler;
 
+    AtomicInteger currentPriority;
+
 
     public DadkvsMainServiceImpl(DadkvsServerState state, DebugHandler debugHandler) {
         this.server_state = state;
         this.debugHandler = debugHandler;
+        this.currentPriority = new AtomicInteger();
     }
 
     @Override
@@ -54,7 +59,7 @@ public class DadkvsMainServiceImpl extends DadkvsMainServiceGrpc.DadkvsMainServi
 
         // Using the index as timestamp for write versioning
         TransactionRecord txrecord = new TransactionRecord(key1, version1, key2, version2, writekey, writeval);
-        server_state.waitForTransactionExecution(reqid, txrecord).thenAccept((result) -> {
+        server_state.waitForTransactionExecution(reqid, txrecord, currentPriority.incrementAndGet()).thenAccept((result) -> {
             System.out.println("Result is ready for request with reqid " + reqid);
             System.out.println("Log when responding: " + server_state.transaction_execution_log + " log size: " + server_state.transaction_execution_log.size());
             DadkvsMain.CommitReply response = DadkvsMain.CommitReply.newBuilder()
