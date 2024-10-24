@@ -28,7 +28,6 @@ public class DadkvsServerState {
     public final Lock leader_lock;
     public final List<Integer> transaction_execution_log;
     public final int[][] configuration_matrix;
-    public final Condition reconfig_condition;
     private final PriorityBlockingQueue<RequestQueueEntry> request_queue;
     private final ConcurrentHashMap<Integer, CompletableFuture<Boolean>> request_future_map;
     private final ConcurrentHashMap<Integer, PaxosRequestEntry> transaction_consensus_map;
@@ -67,7 +66,6 @@ public class DadkvsServerState {
         leader_lock = new ReentrantLock();
         i_am_leader_condition = leader_lock.newCondition();
         empty_queue_condition = leader_lock.newCondition();
-        reconfig_condition = leader_lock.newCondition();
         execution_lock = new ReentrantLock();
         execution_condition = execution_lock.newCondition();
         current_config = DEFAULT_CONFIG;
@@ -222,14 +220,6 @@ public class DadkvsServerState {
         for (RequestQueueEntry requestQueueEntry : requestBatch) {
             if (chosenValues.stream().noneMatch(reqId -> reqId == requestQueueEntry.getReqid())) {
                 request_queue.offer(requestQueueEntry);
-            }
-            if (requestQueueEntry.getTransactionRecord().isReconfigTransaction()) {
-                try {
-                    leader_lock.lock();
-                    reconfig_condition.signal();
-                } finally {
-                    leader_lock.unlock();
-                }
             }
         }
     }
@@ -621,14 +611,6 @@ public class DadkvsServerState {
                     }
                     completeClientRequest(reqId, commitSuccessful);
 
-                    if (transaction.isReconfigTransaction()) {
-                        try {
-                            leader_lock.lock();
-                            reconfig_condition.signal();
-                        } finally {
-                            leader_lock.unlock();
-                        }
-                    }
                     currentIndexWithRequestToExecute = findNextIndexWithRequestToExecute(currentIndexWithRequestToExecute);
                 }
             } catch (InterruptedException e) {
