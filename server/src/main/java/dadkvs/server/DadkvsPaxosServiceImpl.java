@@ -124,9 +124,19 @@ public class DadkvsPaxosServiceImpl extends DadkvsPaxosServiceGrpc.DadkvsPaxosSe
         System.out.println("Receive phase two request: " + request);
         debugHandler.runDebug(server_state.debug_mode, false);
         DadkvsPaxos.MultiPaxosPhaseTwoResponse.Builder multiPaxosPhaseTwoResponse = DadkvsPaxos.MultiPaxosPhaseTwoResponse.newBuilder();
-        for(DadkvsPaxos.PhaseTwoRequest singleRoundRequest : request.getRequestList()){
+        boolean fullBatchAccepted = true;
+        for(DadkvsPaxos.PhaseTwoRequest singleRoundRequest : request.getRequestList()) {
             DadkvsPaxos.PhaseTwoReply response = processPhaseTwoRequest(singleRoundRequest);
+            fullBatchAccepted = fullBatchAccepted && response.getPhase2Accepted();
             multiPaxosPhaseTwoResponse.addResponse(response);
+        }
+        Context forkedContext = Context.current().fork();
+        if(fullBatchAccepted){
+            request.getRequestList().forEach(phaseTwoRequest -> {
+                forkedContext.run(() -> {
+                    server_state.sendLearnRequests(phaseTwoRequest);
+                });
+            });
         }
         responseObserver.onNext(multiPaxosPhaseTwoResponse.build());
         responseObserver.onCompleted();
@@ -152,10 +162,6 @@ public class DadkvsPaxosServiceImpl extends DadkvsPaxosServiceGrpc.DadkvsPaxosSe
                         .setPhase2Index(reqIndex);
                 updateAcceptTimestampState(reqIndex, reqTS);
                 server_state.addAcceptedValue(reqIndex, request.getPhase2Value());
-                Context forkedContext = Context.current().fork();
-                forkedContext.run(() -> {
-                    server_state.sendLearnRequests(reqIndex, request.getPhase2Value(), reqTS);
-                });
             }
         } finally {
             paxosRoundLock.unlock();

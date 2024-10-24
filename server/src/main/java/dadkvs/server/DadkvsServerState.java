@@ -20,7 +20,6 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
 public class DadkvsServerState {
-    // TODO: Fix requests being repeated
     private static final int DEFAULT_CONFIG = 0;
     private static final int BLANK_ENTRY = -1;
     private static final int MAX_BATCH_SIZE = 5;
@@ -33,7 +32,6 @@ public class DadkvsServerState {
     private final PriorityBlockingQueue<RequestQueueEntry> request_queue;
     private final ConcurrentHashMap<Integer, CompletableFuture<Boolean>> request_future_map;
     private final ConcurrentHashMap<Integer, PaxosRequestEntry> transaction_consensus_map;
-    //private final Lock queue_lock;
     private final Condition empty_queue_condition;
     private final Condition i_am_leader_condition;
     ConcurrentHashMap<Integer, PaxosRoundState> paxos_round_state_map;
@@ -46,7 +44,6 @@ public class DadkvsServerState {
     int current_index;
     String default_host;
     KeyValueStore store;
-    //MainLoop main_loop;
     Thread leader_worker;
     Thread execution_worker;
     DadkvsPaxosServiceGrpc.DadkvsPaxosServiceStub[] async_paxos_stubs;
@@ -80,7 +77,6 @@ public class DadkvsServerState {
         store = new KeyValueStore(kv_size);
         leader_worker = new Thread(this::runPaxos);
         execution_worker = new Thread(this::executor);
-        //main_loop_worker.start();
         paxos_targets = new String[total_num_servers];
 
         for (int i = 0; i < total_num_servers; i++) {
@@ -204,8 +200,9 @@ public class DadkvsServerState {
                     reached_consensus = true;
                     moveTransactionsToLog(chosen_values, index);
                     returnRequestsToQueue(requestBatch, chosen_values);
-                    // TODO: Remove state for all rounds in the batch
-                    removePaxosRoundState(index);
+                    for(int i = index; i < chosen_values.size(); i++){
+                        removePaxosRoundState(i);
+                    }
                 }
             }
         }
@@ -222,7 +219,6 @@ public class DadkvsServerState {
     }
 
     private void returnRequestsToQueue(List<RequestQueueEntry> requestBatch, List<Integer> chosenValues) {
-        //TODO: Confirm whether adding to the end of the queue is bad
         for (RequestQueueEntry requestQueueEntry : requestBatch) {
             if (chosenValues.stream().noneMatch(reqId -> reqId == requestQueueEntry.getReqid())) {
                 request_queue.offer(requestQueueEntry);
@@ -239,7 +235,10 @@ public class DadkvsServerState {
     }
 
 
-    public void sendLearnRequests(int index, int value, int timestamp) {
+    public void sendLearnRequests(DadkvsPaxos.PhaseTwoRequest request) {
+        int index = request.getPhase2Index();
+        int value = request.getPhase2Value();
+        int timestamp = request.getPhase2Timestamp();
         DadkvsPaxos.LearnRequest.Builder learnRequest = DadkvsPaxos.LearnRequest.newBuilder();
         GenericResponseCollector<DadkvsPaxos.PhaseOneReply> learnResponseCollector =
                 new GenericResponseCollector<>(new ArrayList<>(), total_num_servers);
@@ -321,13 +320,6 @@ public class DadkvsServerState {
             addTransactionToLog(reqIds.get(i), index + i);
         }
     }
-
-    /*public synchronized void moveTransactionToLog(int reqId, int index) {
-        System.out.println("Queue size when moving to log: " + request_queue.size());
-        moveTransactionToMap(reqId, RequestState.PENDING_EXECUTION);
-        fillTransactionLog(index);
-        addTransactionToLog(reqId, index);
-    }*/
 
     public synchronized void moveTransactionToMap(int reqId, RequestState requestState) {
         RequestQueueEntry req = findAndRemoveFromQueue(reqId);
@@ -464,6 +456,8 @@ public class DadkvsServerState {
         return largestTimestamp > 0 ? acceptedValue : reqId;
     }
 
+    // Checking if a request id is a reconfig by the last digit of the request id which is 0 for the console
+    // TODO: Maybe change
     private boolean isReconfigByReqId(int reqId){
         return reqId % 10 == 0;
     }
@@ -480,9 +474,6 @@ public class DadkvsServerState {
         return reqId != -1 && transaction_consensus_map.get(reqId).hasCompleted();
     }
 
-    public PaxosRequestEntry getPaxosRequestEntry(int reqId) {
-        return transaction_consensus_map.get(reqId);
-    }
 
     private void initPaxosStubs() {
         ManagedChannel[] channels = new ManagedChannel[total_num_servers];
