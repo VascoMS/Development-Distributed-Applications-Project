@@ -577,7 +577,7 @@ public class DadkvsServerState {
                 try {
                     reconfig_lock.lock();
                     PaxosRequestEntry requestEntry = transaction_consensus_map.get(reqId);
-                    if(requestEntry == null)
+                    if(!requestEntry.transactionIsAvailable())
                         reconfig_condition.await();
                     current_config = transaction_consensus_map.get(reqId)
                             .getTransactionRecord().getPrepareValue();
