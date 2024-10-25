@@ -26,7 +26,6 @@ public class LearnHandler {
                 learnRequestEntry.increaseCount() == learnMajority) {
             System.out.println("LEARNER COUNT: " + learnRequestEntry.getCount() + " TIMESTAMP: " + learnRequest.getLearntimestamp());
             System.out.println("MOVING REQ TO LOG: req-" + reqId + " index- " + index);
-            // TODO: Maybe dont create a List with a single element
             serverState.moveTransactionsToLog(List.of(reqId), index);
             try {
                 serverState.execution_lock.lock();
@@ -34,8 +33,6 @@ public class LearnHandler {
             } finally {
                 serverState.execution_lock.unlock();
             }
-            //if(!serverState.i_am_leader)
-            //    serverState.removePaxosRoundState(learnRequest.getLearnindex());
         }
     }
 

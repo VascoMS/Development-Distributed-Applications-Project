@@ -26,6 +26,7 @@ public class DadkvsServerState {
     public final Lock execution_lock;
     public final Condition execution_condition;
     public final Lock leader_lock;
+    public final Lock queue_lock;
     public final List<Integer> transaction_execution_log;
     public final int[][] configuration_matrix;
     private final PriorityBlockingQueue<RequestQueueEntry> request_queue;
@@ -57,13 +58,14 @@ public class DadkvsServerState {
         i_am_leader = false;
         default_host = "localhost";
         debug_mode = 0;
-        current_index = -1;
+        current_index = 0;
         paxos_round_state_map = new ConcurrentHashMap<>();
         request_queue = new PriorityBlockingQueue<>(MAX_BATCH_SIZE,new RequestPriorityComparator());
         request_future_map = new ConcurrentHashMap<>();
         transaction_consensus_map = new ConcurrentHashMap<>();
         transaction_execution_log = new ArrayList<>();
         leader_lock = new ReentrantLock();
+        queue_lock = new ReentrantLock();
         i_am_leader_condition = leader_lock.newCondition();
         empty_queue_condition = leader_lock.newCondition();
         execution_lock = new ReentrantLock();
@@ -141,7 +143,6 @@ public class DadkvsServerState {
         // Building a request batch based on the queue size, the max batch size and the number of
         // contiguous empty slots available in the log from the current index
         for (int i = 0; !request_queue.isEmpty() && newRequestBatch.size() < MAX_BATCH_SIZE && isIndexEmpty(current_index + i); i++) {
-            //Taking the request out the queue, adding it into the requestBatch and incrementing the fakeIndex
             RequestQueueEntry currentRequest = request_queue.peek();
             // If learner fetched the last request from the queue after we check if queue is empty, we can break the loop
             // and return the batch
@@ -149,6 +150,7 @@ public class DadkvsServerState {
                 break;
             }
             newRequestBatch.add(currentRequest);
+            System.out.println("Added request to batch: " + currentRequest.getReqid());
             moveTransactionToMap(currentRequest.getReqid(), RequestState.AWAITING_PROPOSAL);
 
             //if its a reconfig, we added it into the batch, but stopped adding stuff afterwards
@@ -198,9 +200,6 @@ public class DadkvsServerState {
                     reached_consensus = true;
                     moveTransactionsToLog(chosen_values, index);
                     returnRequestsToQueue(requestBatch, chosen_values);
-                    //for(int i = index; i < chosen_values.size(); i++){
-                    //    removePaxosRoundState(i);
-                    //}
                 }
             }
         }
@@ -218,9 +217,16 @@ public class DadkvsServerState {
 
     private void returnRequestsToQueue(List<RequestQueueEntry> requestBatch, List<Integer> chosenValues) {
         for (RequestQueueEntry requestQueueEntry : requestBatch) {
-            if (chosenValues.stream().noneMatch(reqId -> reqId.equals(requestQueueEntry.getReqid()))) {
-                request_queue.offer(requestQueueEntry);
+            try {
+                queue_lock.lock();
+                boolean isRequestApproved = transaction_consensus_map.get(requestQueueEntry.getReqid()).isApproved();
+                if (!isRequestApproved && chosenValues.stream().noneMatch(reqId -> reqId.equals(requestQueueEntry.getReqid()))) {
+                    request_queue.offer(requestQueueEntry);
+                }
+            } finally {
+                queue_lock.unlock();
             }
+
         }
     }
 
@@ -302,23 +308,28 @@ public class DadkvsServerState {
     }
 
     public synchronized void moveTransactionsToLog(List<Integer> reqIds, int index) {
-        System.out.println("Queue size when moving to log: " + request_queue.size());
         // Filling transaction log with nulls to accommodate the start of the received batch in the log.
         fillTransactionLog(index);
+        System.out.println("Batch being added to log: " + reqIds);
         for (int i = 0; i < reqIds.size(); i++) {
             moveTransactionToMap(reqIds.get(i), RequestState.PENDING_EXECUTION);
             addTransactionToLog(reqIds.get(i), index + i);
         }
     }
 
-    public synchronized void moveTransactionToMap(int reqId, RequestState requestState) {
-        RequestQueueEntry req = findAndRemoveFromQueue(reqId);
-        if (req != null) {
-            transaction_consensus_map.put(reqId, new PaxosRequestEntry(req.getTransactionRecord(), requestState));
-        } else if (!transaction_consensus_map.containsKey(reqId)) {
-            transaction_consensus_map.put(reqId, new PaxosRequestEntry());
-        }  else if (requestState.isGreaterThan(transaction_consensus_map.get(reqId).getRequestState())) {
-            transaction_consensus_map.get(reqId).setRequestState(requestState);
+    public void moveTransactionToMap(int reqId, RequestState requestState) {
+        try {
+            queue_lock.lock();
+            RequestQueueEntry req = findAndRemoveFromQueue(reqId);
+            if (req != null) {
+                transaction_consensus_map.put(reqId, new PaxosRequestEntry(req.getTransactionRecord(), requestState));
+            } else if (!transaction_consensus_map.containsKey(reqId)) {
+                transaction_consensus_map.put(reqId, new PaxosRequestEntry());
+            }  else if (requestState.isGreaterThan(transaction_consensus_map.get(reqId).getRequestState())) {
+                transaction_consensus_map.get(reqId).setRequestState(requestState);
+            }
+        } finally {
+            queue_lock.unlock();
         }
     }
 
@@ -449,7 +460,6 @@ public class DadkvsServerState {
     }
 
     // Checking if a request id is a reconfig by the last digit of the request id which is 0 for the console
-    // TODO: Maybe change
     private boolean isReconfigByReqId(int reqId){
         return reqId % 10 == 0;
     }
@@ -514,7 +524,7 @@ public class DadkvsServerState {
     }
 
     public synchronized int updateIndex() {
-        current_index = findNextFreeIndex(current_index + 1);
+        current_index = findNextFreeIndex(current_index);
         return current_index;
     }
 
@@ -592,10 +602,10 @@ public class DadkvsServerState {
     }
 
     private void executor() {
-        int currentIndexWithRequestToExecute = findNextIndexWithRequestToExecute(0);
-        while (true) {
-            try {
-                execution_lock.lock();
+        try{
+            execution_lock.lock();
+            int currentIndexWithRequestToExecute = findNextIndexWithRequestToExecute(0);
+            while (true) {
                 if (isIndexEmpty(currentIndexWithRequestToExecute) ||
                         !getRequestEntryFromIndex(currentIndexWithRequestToExecute).transactionIsAvailable()) {
                     execution_condition.await();
@@ -615,12 +625,14 @@ public class DadkvsServerState {
 
                     currentIndexWithRequestToExecute = findNextIndexWithRequestToExecute(currentIndexWithRequestToExecute);
                 }
-            } catch (InterruptedException e) {
-                System.out.println("Thread interrupted");
-            } finally {
-                execution_lock.unlock();
             }
+        } catch (InterruptedException e) {
+            System.out.println("Thread interrupted");
         }
+        finally {
+            execution_lock.unlock();
+        }
+
     }
 
     public PaxosRequestEntry getRequestEntryFromIndex(int index) {

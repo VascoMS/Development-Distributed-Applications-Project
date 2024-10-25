@@ -59,4 +59,8 @@ public class PaxosRequestEntry {
     public void setCommited() {
         this.requestState = RequestState.COMMITTED;
     }
+
+    public boolean isApproved(){
+        return this.requestState != RequestState.AWAITING_PROPOSAL;
+    }
 }
