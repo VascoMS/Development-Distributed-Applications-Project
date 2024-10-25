@@ -198,9 +198,9 @@ public class DadkvsServerState {
                     reached_consensus = true;
                     moveTransactionsToLog(chosen_values, index);
                     returnRequestsToQueue(requestBatch, chosen_values);
-                    for(int i = index; i < chosen_values.size(); i++){
-                        removePaxosRoundState(i);
-                    }
+                    //for(int i = index; i < chosen_values.size(); i++){
+                    //    removePaxosRoundState(i);
+                    //}
                 }
             }
         }
@@ -218,7 +218,7 @@ public class DadkvsServerState {
 
     private void returnRequestsToQueue(List<RequestQueueEntry> requestBatch, List<Integer> chosenValues) {
         for (RequestQueueEntry requestQueueEntry : requestBatch) {
-            if (chosenValues.stream().noneMatch(reqId -> reqId == requestQueueEntry.getReqid())) {
+            if (chosenValues.stream().noneMatch(reqId -> reqId.equals(requestQueueEntry.getReqid()))) {
                 request_queue.offer(requestQueueEntry);
             }
         }
@@ -257,7 +257,7 @@ public class DadkvsServerState {
                 }
                 boolean hasGreaterLeader = largestTimestamp > leader_ts;
                 if (hasGreaterLeader) {
-                    updateLeaderTimestamp(largestTimestamp, index);
+                    updateLeaderTimestamp(largestTimestamp, currentIndex);
                 }
                 rejected = rejected || hasGreaterLeader;
             }
@@ -278,7 +278,7 @@ public class DadkvsServerState {
                 }
                 boolean hasGreaterLeader = largestTimestamp > leader_ts;
                 if (hasGreaterLeader) {
-                    updateLeaderTimestamp(largestTimestamp, index);
+                    updateLeaderTimestamp(largestTimestamp, currentIndex);
                 }
                 rejected = rejected || hasGreaterLeader;
             }
@@ -317,7 +317,7 @@ public class DadkvsServerState {
             transaction_consensus_map.put(reqId, new PaxosRequestEntry(req.getTransactionRecord(), requestState));
         } else if (!transaction_consensus_map.containsKey(reqId)) {
             transaction_consensus_map.put(reqId, new PaxosRequestEntry());
-        } else if (!transaction_consensus_map.get(reqId).getRequestState().equals(requestState)) {
+        }  else if (requestState.isGreaterThan(transaction_consensus_map.get(reqId).getRequestState())) {
             transaction_consensus_map.get(reqId).setRequestState(requestState);
         }
     }
@@ -398,6 +398,7 @@ public class DadkvsServerState {
     private void runPhase1(GenericResponseCollector<DadkvsPaxos.MultiPaxosPhaseOneResponse> phase_one_collector, DadkvsPaxos.MultiPaxosPhaseOneRequest request) {
         for (int serverIndex : configuration_matrix[current_config]) {
             System.out.println("Leader sending phase 1 request: ");
+            System.out.println("I am leader " + my_id);
             DadkvsPaxosServiceGrpc.DadkvsPaxosServiceStub stub = async_paxos_stubs[serverIndex];
             CollectorStreamObserver.printMessageFields(request);
             CollectorStreamObserver<DadkvsPaxos.MultiPaxosPhaseOneResponse> phase_one_observer =
@@ -409,6 +410,7 @@ public class DadkvsServerState {
     private void runPhase2(GenericResponseCollector<DadkvsPaxos.MultiPaxosPhaseTwoResponse> phase_two_collector, DadkvsPaxos.MultiPaxosPhaseTwoRequest request) {
         for (int serverIndex : configuration_matrix[current_config]) {
             System.out.println("Leader sending phase 2 request:\n" + request);
+            System.out.println("I am leader " + my_id);
             DadkvsPaxosServiceGrpc.DadkvsPaxosServiceStub stub = async_paxos_stubs[serverIndex];
             CollectorStreamObserver.printMessageFields(request);
             CollectorStreamObserver<DadkvsPaxos.MultiPaxosPhaseTwoResponse> phase_two_observer =

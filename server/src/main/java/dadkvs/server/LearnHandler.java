@@ -34,8 +34,8 @@ public class LearnHandler {
             } finally {
                 serverState.execution_lock.unlock();
             }
-            if(!serverState.i_am_leader)
-                serverState.removePaxosRoundState(learnRequest.getLearnindex());
+            //if(!serverState.i_am_leader)
+            //    serverState.removePaxosRoundState(learnRequest.getLearnindex());
         }
     }
 
