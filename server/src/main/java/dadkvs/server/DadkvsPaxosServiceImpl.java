@@ -133,6 +133,11 @@ public class DadkvsPaxosServiceImpl extends DadkvsPaxosServiceGrpc.DadkvsPaxosSe
         Context forkedContext = Context.current().fork();
         if(fullBatchAccepted){
             request.getRequestList().forEach(phaseTwoRequest -> {
+                int index = phaseTwoRequest.getPhase2Index();
+                int ts = phaseTwoRequest.getPhase2Timestamp();
+                int value = phaseTwoRequest.getPhase2Value();
+                updateAcceptTimestampState(index, ts);
+                server_state.addAcceptedValue(index, value);
                 forkedContext.run(() -> {
                     server_state.sendLearnRequests(phaseTwoRequest);
                 });
@@ -160,8 +165,6 @@ public class DadkvsPaxosServiceImpl extends DadkvsPaxosServiceGrpc.DadkvsPaxosSe
                 phase_two_response
                         .setPhase2Accepted(true)
                         .setPhase2Index(reqIndex);
-                updateAcceptTimestampState(reqIndex, reqTS);
-                server_state.addAcceptedValue(reqIndex, request.getPhase2Value());
             }
         } finally {
             paxosRoundLock.unlock();
