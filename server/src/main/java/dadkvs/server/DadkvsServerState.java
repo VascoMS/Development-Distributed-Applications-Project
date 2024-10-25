@@ -27,6 +27,7 @@ public class DadkvsServerState {
     public final Condition execution_condition;
     public final Lock leader_lock;
     public final Lock queue_lock;
+    public final Lock reconfig_lock;
     public final List<Integer> transaction_execution_log;
     public final int[][] configuration_matrix;
     private final PriorityBlockingQueue<RequestQueueEntry> request_queue;
@@ -34,6 +35,7 @@ public class DadkvsServerState {
     private final ConcurrentHashMap<Integer, PaxosRequestEntry> transaction_consensus_map;
     private final Condition empty_queue_condition;
     private final Condition i_am_leader_condition;
+    private final Condition reconfig_condition;
     ConcurrentHashMap<Integer, PaxosRoundState> paxos_round_state_map;
     boolean i_am_leader;
     int debug_mode;
@@ -66,10 +68,12 @@ public class DadkvsServerState {
         transaction_execution_log = new ArrayList<>();
         leader_lock = new ReentrantLock();
         queue_lock = new ReentrantLock();
+        reconfig_lock = new ReentrantLock();
         i_am_leader_condition = leader_lock.newCondition();
         empty_queue_condition = leader_lock.newCondition();
         execution_lock = new ReentrantLock();
         execution_condition = execution_lock.newCondition();
+        reconfig_condition = reconfig_lock.newCondition();
         current_config = DEFAULT_CONFIG;
         configuration_matrix = new int[][]{{0, 1, 2}, {1, 2, 3}, {2, 3, 4}};
 
@@ -570,8 +574,18 @@ public class DadkvsServerState {
             // Check if this transaction is an incomplete reconfiguration
             else if (isReconfig(i - 1)) {
                 // Set the current configuration from the transaction consensus map
-                current_config = transaction_consensus_map.get(reqId)
-                        .getTransactionRecord().getPrepareValue();
+                try {
+                    reconfig_lock.lock();
+                    PaxosRequestEntry requestEntry = transaction_consensus_map.get(reqId);
+                    if(requestEntry == null)
+                        reconfig_condition.await();
+                    current_config = transaction_consensus_map.get(reqId)
+                            .getTransactionRecord().getPrepareValue();
+                } catch (InterruptedException e) {
+                    System.out.println("Interrupted");
+                } finally {
+                    reconfig_lock.unlock();
+                }
                 break;
             }
         }
@@ -622,6 +636,14 @@ public class DadkvsServerState {
                         paxosRequestEntry.setAborted();
                     }
                     completeClientRequest(reqId, commitSuccessful);
+                    if(transaction.isReconfigTransaction()){
+                        try {
+                            reconfig_lock.lock();
+                            reconfig_condition.signal();
+                        } finally{
+                            reconfig_lock.unlock();
+                        }
+                    }
 
                     currentIndexWithRequestToExecute = findNextIndexWithRequestToExecute(currentIndexWithRequestToExecute);
                 }
