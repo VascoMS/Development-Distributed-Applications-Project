@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.Scanner;
 
+// Implemented by the teacher, doesn't look very good
 public class DadkvsConsoleClient {
 
     public static void main(String[] args) throws Exception {

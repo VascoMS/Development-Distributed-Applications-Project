@@ -15,7 +15,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 
-
+// Implemented by the teacher, doesn't look very good
 public class DadkvsClient {
 
     boolean interactive_mode;
