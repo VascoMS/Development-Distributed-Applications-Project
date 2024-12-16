@@ -1,8 +1,6 @@
 # DAD2425
 Project course for DAD 2024-25
 
-This repository holds the base code required to implement the project. Students are free to improve on the following code.
-
 # Requirements
 
 The project requires the following packages:
