@@ -1,5 +1,5 @@
 # DAD2425
-Project course for DAD 2024-25
+Project course for DAD 2024-25, Distributed Key-Value Store using Multi-Paxos
 
 # Requirements
 
