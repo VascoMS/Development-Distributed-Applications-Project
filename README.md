@@ -1,5 +1,5 @@
 # DAD2425
-Project course for DAD 2024-25, Distributed Key-Value Store using Multi-Paxos. Read [Report](./Report.pdf) for an overview of the implementation.
+Project course for DAD 2024-25, Distributed Key-Value Store using Multi-Paxos supporting simple reconfiguration. Read [Report](./Report.pdf) for an overview of the implementation.
 
 # Requirements
 
